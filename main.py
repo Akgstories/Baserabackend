@@ -280,9 +280,19 @@ def seed_database():
 
 app = FastAPI(title="Basera Multi-Portal API", version="12.2.0")
 
+# ─── CORS CONFIGURATION FOR PRODUCTION & LOCAL DOMAINS ──────────────
+origins = [
+    "https://baseras.in",
+    "https://www.baseras.in",
+    "http://localhost:3000",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
