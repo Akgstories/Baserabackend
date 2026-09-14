@@ -7,9 +7,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, DateTime, or_, and_
@@ -126,7 +126,7 @@ class DBVacateRequest(Base):
     student_phone: Mapped[str] = mapped_column(String, nullable=False)
     booking_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, default="Pending")
-    created_at: Mapped[str] = mapped_column(String, default=datetime.now().strftime("%Y-%m-%d %H:%M"))
+    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 class DBMessStudent(Base):
     __tablename__ = "mess_students"
@@ -139,7 +139,7 @@ class DBMessStudent(Base):
     diet: Mapped[str] = mapped_column(String, nullable=False)
     base_price: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    expiry_date: Mapped[str] = mapped_column(String, default=(datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"))
+    expiry_date: Mapped[str] = mapped_column(String, default=lambda: (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"))
 
 class DBMealCancellation(Base):
     __tablename__ = "meal_cancellations"
@@ -190,7 +190,7 @@ class DBComplaint(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String, default="Pending")
-    created_at: Mapped[str] = mapped_column(String, default=datetime.now().strftime("%Y-%m-%d %H:%M"))
+    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 class DBNotification(Base):
     __tablename__ = "notifications"
@@ -199,7 +199,7 @@ class DBNotification(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(String, default="general")
-    created_at: Mapped[str] = mapped_column(String, default=datetime.now().strftime("%Y-%m-%d %H:%M"))
+    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
 def seed_database():
@@ -281,22 +281,33 @@ def seed_database():
 
 app = FastAPI(title="Basera Multi-Portal API", version="12.2.0")
 
-# ─── FAIL-SAFE CORS CONFIGURATION ───────────────────────────────────
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ─── UNIVERSAL DYNAMIC CORS MIDDLEWARE ─────────────────────────────
+@app.middleware("http")
+async def cors_handler(request: Request, call_next):
+    origin = request.headers.get("origin", "*")
+    
+    # Preemptively answer OPTIONS preflight requests
+    if request.method == "OPTIONS":
+        response = Response(status_code=200)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"Internal Backend Error: {str(exc)}"},
-        headers={"Access-Control-Allow-Origin": "*"}
-    )
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal Server Error: {str(exc)}"}
+        )
+
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
 
 @app.on_event("startup")
 def on_startup():
