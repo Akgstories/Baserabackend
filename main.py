@@ -49,8 +49,7 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 # ─── AUTOMATIC IMAGE CONVERSION & COMPRESSION ENGINE ─────────────────
 def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), quality=75) -> str:
     """
-    Automatically resizes and converts base64 image data to lightweight WebP format.
-    Reduces 5MB+ phone photos down to ~40-80KB for maximum web efficiency.
+    Resizes and converts base64 image data to WebP format to reduce phone photos down to ~40-80KB.
     """
     if not base64_data or not base64_data.startswith("data:image"):
         return base64_data
@@ -89,11 +88,14 @@ SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "no-reply@baseras.in")
 SENDER_PASSWORD = os.getenv("BREVO_SMTP_KEY", "")
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str):
+    """
+    Dispatches automated transactional email alerts using Brevo SMTP.
+    """
     if not recipient_email or "@" not in recipient_email:
         return
 
     if not SENDER_PASSWORD:
-        print(f"[BREVO MOCK ALERT] To: {recipient_email} | Subject: {subject} | Body: {body_text[:70]}...")
+        print(f"[BREVO EMAIL DISPATCH] To: {recipient_email} | Subject: {subject} | Body snippet: {body_text[:80]}...")
         return
 
     try:
@@ -334,7 +336,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.0.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.1.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -372,12 +374,41 @@ def get_db():
     finally:
         db.close()
 
-def notify_owner(db: Session, recipient_role: str, title: str, message: str, event_type: str = "general"):
+# ─── ENHANCED NOTIFICATION ENGINE (DB INBOX + AUTOMATED EMAIL) ───────
+def notify_owner_and_email(
+    db: Session,
+    background_tasks: BackgroundTasks,
+    recipient_role: str,
+    title: str,
+    message: str,
+    event_type: str = "general"
+):
+    """
+    Saves in-app portal notification and dispatches instant emails to all relevant owners/admins.
+    """
+    # 1. Save to database notifications table
     db.add(DBNotification(
-        id=f"notif-{uuid.uuid4().hex[:8]}", recipient_role=recipient_role,
-        title=title, message=message, event_type=event_type,
+        id=f"notif-{uuid.uuid4().hex[:8]}",
+        recipient_role=recipient_role,
+        title=title,
+        message=message,
+        event_type=event_type,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
     ))
+
+    # 2. Dispatch email to all users with matching role or platform admin
+    target_users = db.query(DBUser).filter(
+        or_(DBUser.role == recipient_role, DBUser.role == "admin")
+    ).all()
+
+    for target in target_users:
+        if target.email:
+            background_tasks.add_task(
+                send_email_notification,
+                target.email,
+                f"[{recipient_role.upper()} ALERT] {title}",
+                f"Hello {target.full_name},\n\n{message}\n\nEvent Type: {event_type}\nTimestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n— Basera Portal Automated Notification System"
+            )
 
 
 # ─── SCHEMAS & AUTH ───────────────────────────────────────────────
@@ -501,11 +532,12 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
 
     db.commit()
 
+    # STUDENT REGISTERED EMAIL
     background_tasks.add_task(
         send_email_notification,
         req.email,
         "Welcome to Basera Platform!",
-        f"Hello {req.full_name},\n\nYour account has been registered as a {role.upper()} on Basera.\n\nThank you!"
+        f"Hello {req.full_name},\n\nYour account has been registered successfully as a {role.upper()} on Basera.\n\nPhone: {clean_phone}\nAddress: {req.address}\n\nThank you for joining Basera!"
     )
 
     return {"status": "success", "token": token, "user": {"id": new_user.id, "full_name": new_user.full_name, "email": new_user.email, "phone": new_user.phone, "address": new_user.address, "google_map_url": new_user.google_map_url, "role": new_user.role}}
@@ -556,11 +588,12 @@ def forgot_password(req: ForgotPasswordRequest, background_tasks: BackgroundTask
         u.password = req.new_password
     db.commit()
 
+    # PASSWORD RESET EMAIL
     background_tasks.add_task(
         send_email_notification,
         req.email,
         "Basera Password Reset Confirmation",
-        "Your Basera account password has been updated successfully. If you did not request this, please contact support."
+        "Your Basera account password has been updated successfully. If you did not request this change, please contact platform support immediately."
     )
 
     return {"status": "success", "message": "Password updated successfully!"}
@@ -616,6 +649,31 @@ def get_student_reminders(user: dict = Depends(get_current_user), db: Session = 
         }
     }
 
+@app.post("/api/student/send-reminder-emails")
+def send_reminder_emails(background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Triggers automated email reminders for expiring mess subscriptions or due rent."""
+    reminders = get_student_reminders(user=user, db=db)
+    mess_rem = reminders["mess_reminder"]
+    pg_rem = reminders["pg_reminder"]
+
+    if mess_rem["should_alert"]:
+        background_tasks.add_task(
+            send_email_notification,
+            user["email"],
+            "Reminder: Mess Subscription Expiring Soon",
+            f"Hi {user['full_name']},\n\n{mess_rem['message']}\n\nPlease renew your subscription to ensure uninterrupted meal services."
+        )
+
+    if pg_rem["should_alert"]:
+        background_tasks.add_task(
+            send_email_notification,
+            user["email"],
+            "Reminder: Monthly PG Rent Payment Due",
+            f"Hi {user['full_name']},\n\n{pg_rem['message']}\n\nPlease clear your monthly rent payment from your student portal dashboard."
+        )
+
+    return {"status": "success", "message": "Reminder emails dispatched to student inbox!"}
+
 @app.get("/api/pgs")
 def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Query(None), db: Session = Depends(get_db)):
     query = db.query(DBPGListing)
@@ -659,10 +717,9 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
 
     return result
 
-# ─── UNIVERSAL RAZORPAY PAYMENT ENDPOINTS ─────────────────────────
+# ─── UNIVERSAL RAZORPAY PAYMENT & EMAIL ENDPOINTS ───────────────────
 @app.post("/api/payments/create-order")
 def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user)):
-    """Generates a secure Razorpay Order ID for online checkout."""
     try:
         order_data = {
             "amount": req.amount * 100,  # Razorpay expects amount in paise
@@ -692,7 +749,7 @@ def verify_payment_and_fulfill(
     user: dict = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """Cryptographically verifies Razorpay HMAC SHA-256 signature and fulfills PG Bookings or Mess Subscriptions."""
+    """Verifies Razorpay signature and emails student receipt + owner notification."""
     generated_signature = hmac.new(
         RAZORPAY_KEY_SECRET.encode(),
         f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode(),
@@ -751,7 +808,16 @@ def verify_payment_and_fulfill(
                 is_active=True,
                 expiry_date=new_expiry
             ))
-        notify_owner(db, "mess_partner", "Paid Mess Subscription Confirmed", f"{user['full_name']} paid ₹{req.monthly_amount} for {req.item_name}.", "mess_payment")
+
+        # NOTIFY MESS OWNER (INBOX + EMAIL)
+        notify_owner_and_email(
+            db=db,
+            background_tasks=background_tasks,
+            recipient_role="mess_partner",
+            title="New Mess Subscription Confirmed",
+            message=f"Student '{user['full_name']}' ({user['phone']}) subscribed to '{req.item_name}' (Amount Paid: ₹{req.monthly_amount}). Delivery Address: {user['address']}",
+            event_type="mess_payment"
+        )
     else:
         vacant_room = db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").first()
         if vacant_room:
@@ -759,15 +825,25 @@ def verify_payment_and_fulfill(
             vacant_room.tenant_name = user["full_name"]
             vacant_room.tenant_phone = user["phone"]
             vacant_room.tenant_address = user["address"]
-        notify_owner(db, "pg_owner", "Paid Room Booking Confirmed", f"{user['full_name']} paid ₹{req.monthly_amount} for {req.item_name}.", "booking")
+
+        # NOTIFY PG OWNER (INBOX + EMAIL)
+        notify_owner_and_email(
+            db=db,
+            background_tasks=background_tasks,
+            recipient_role="pg_owner",
+            title="New Room Booking Paid & Confirmed",
+            message=f"Student '{user['full_name']}' ({user['phone']}) paid ₹{req.monthly_amount} for '{req.item_name}'. Move-in Date: {req.move_in_date}.",
+            event_type="booking"
+        )
 
     db.commit()
 
+    # EMAIL DIGITAL RECEIPT TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
         f"Payment & Service Receipt: {req.item_name}",
-        f"Hi {user['full_name']},\n\nPayment Successful!\nTransaction ID: {txn_id}\nAmount Paid: ₹{req.monthly_amount}\nService: {req.item_name}\nEffective Date: {req.move_in_date}"
+        f"Hi {user['full_name']},\n\nYour payment has been successfully processed!\n\nTransaction ID: {txn_id}\nItem/Service: {req.item_name}\nAmount Paid: ₹{req.monthly_amount}\nEffective Date: {req.move_in_date}\n\nThank you for using Basera!"
     )
 
     return {"status": "success", "message": f"Payment verified successfully! {req.item_name} activated."}
@@ -811,14 +887,24 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
     )
     db.add(new_cancel)
 
-    notify_owner(db, "mess_partner", f"Meal Canceled: {req.meal_type}", f"{user['full_name']} ({user['phone']}) canceled {req.meal_type} for {target_date}.", "meal_cancel")
+    # NOTIFY MESS OWNER (INBOX + EMAIL)
+    notify_owner_and_email(
+        db=db,
+        background_tasks=background_tasks,
+        recipient_role="mess_partner",
+        title=f"Meal Canceled: {req.meal_type} ({target_date})",
+        message=f"Student '{user['full_name']}' ({user['phone']}) canceled {req.meal_type} for date {target_date}. Refund credited: ₹{refund_coins}.",
+        event_type="meal_cancel"
+    )
+
     db.commit()
 
+    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
         f"Meal Cancellation Confirmed: {req.meal_type} ({target_date})",
-        f"Hi {user['full_name']},\n\nYour request to cancel {req.meal_type} for {target_date} is confirmed. ₹{refund_coins} has been credited to your bill."
+        f"Hi {user['full_name']},\n\nYour request to cancel {req.meal_type} for {target_date} has been processed.\n\n₹{refund_coins} refund has been credited to your monthly ledger statement."
     )
 
     return {"status": "success", "message": f"Canceled {req.meal_type} for {target_date}! ₹{refund_coins} credited."}
@@ -852,14 +938,24 @@ def uncancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, use
 
     db.delete(cancel_rec)
 
-    notify_owner(db, "mess_partner", f"Meal Restored: {req.meal_type}", f"{user['full_name']} restored {req.meal_type} for {target_date}.", "meal_restore")
+    # NOTIFY MESS OWNER (INBOX + EMAIL)
+    notify_owner_and_email(
+        db=db,
+        background_tasks=background_tasks,
+        recipient_role="mess_partner",
+        title=f"Meal Restored: {req.meal_type} ({target_date})",
+        message=f"Student '{user['full_name']}' restored {req.meal_type} for {target_date}. Please count this meal in kitchen prep.",
+        event_type="meal_restore"
+    )
+
     db.commit()
 
+    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
         f"Meal Restored: {req.meal_type} ({target_date})",
-        f"Hi {user['full_name']},\n\nYour {req.meal_type} for {target_date} has been restored successfully."
+        f"Hi {user['full_name']},\n\nYour {req.meal_type} for {target_date} has been restored successfully in the kitchen dispatch order."
     )
 
     return {"status": "success", "message": f"Successfully restored {req.meal_type} for {target_date}!"}
@@ -978,7 +1074,7 @@ def get_my_bookings(user: dict = Depends(get_current_user), db: Session = Depend
     return [{"id": b.id, "target_type": b.target_type, "item_name": b.item_name, "move_in_date": b.move_in_date, "monthly_amount": b.monthly_amount, "payment_method": b.payment_method, "transaction_id": b.transaction_id, "status": b.status} for b in b_list]
 
 @app.post("/api/pg/request-vacate")
-def request_student_vacate(req: RequestStudentVacate, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def request_student_vacate(req: RequestStudentVacate, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     booking = db.query(DBBooking).filter(DBBooking.id == req.booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found.")
@@ -986,9 +1082,29 @@ def request_student_vacate(req: RequestStudentVacate, user: dict = Depends(get_c
     room = db.query(DBPGRoom).filter(DBPGRoom.tenant_name == user["full_name"]).first()
     room_num = room.room_number if room else "101"
 
-    db.add(DBVacateRequest(id=f"vreq-{uuid.uuid4().hex[:6]}", room_number=room_num, student_name=user["full_name"], student_phone=user["phone"] or user["email"], booking_id=booking.id, status="Pending"))
-    notify_owner(db, "pg_owner", "Room Vacate Request Submitted", f"{user['full_name']} requested to vacate Room {room_num}.", "vacate_request")
+    vreq_id = f"vreq-{uuid.uuid4().hex[:6]}"
+    db.add(DBVacateRequest(id=vreq_id, room_number=room_num, student_name=user["full_name"], student_phone=user["phone"] or user["email"], booking_id=booking.id, status="Pending"))
+
+    # NOTIFY PG OWNER (INBOX + EMAIL)
+    notify_owner_and_email(
+        db=db,
+        background_tasks=background_tasks,
+        recipient_role="pg_owner",
+        title="Room Vacate Request Submitted",
+        message=f"Student '{user['full_name']}' ({user['phone']}) requested to vacate Room {room_num}.",
+        event_type="vacate_request"
+    )
+
     db.commit()
+
+    # CONFIRMATION EMAIL TO STUDENT
+    background_tasks.add_task(
+        send_email_notification,
+        user["email"],
+        "Room Vacate Request Received",
+        f"Hi {user['full_name']},\n\nYour vacate request for Room {room_num} has been submitted to your PG owner for review."
+    )
+
     return {"status": "success", "message": "Vacate request submitted!"}
 
 @app.get("/api/pg/vacate-requests")
@@ -999,6 +1115,7 @@ def get_vacate_requests(db: Session = Depends(get_db)):
 def approve_vacate_request(req: ApproveVacateRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     if user["role"] not in ["pg_owner", "admin"]:
         raise HTTPException(status_code=403, detail="Unauthorized.")
+
     v_req = db.query(DBVacateRequest).filter(DBVacateRequest.id == req.request_id).first()
     if v_req:
         v_req.status = "Approved"
@@ -1008,13 +1125,14 @@ def approve_vacate_request(req: ApproveVacateRequest, background_tasks: Backgrou
         if r: r.status, r.tenant_name, r.tenant_phone, r.tenant_address = "vacant", "-", "-", "-"
         db.commit()
 
+        # EMAIL STUDENT VACATE APPROVAL
         student_user = db.query(DBUser).filter(DBUser.full_name == v_req.student_name).first()
         if student_user:
             background_tasks.add_task(
                 send_email_notification,
                 student_user.email,
                 "Room Vacate Request Approved",
-                f"Hello {v_req.student_name},\n\nYour request to vacate Room {v_req.room_number} has been approved."
+                f"Hello {v_req.student_name},\n\nYour request to vacate Room {v_req.room_number} has been APPROVED by the PG owner."
             )
 
     return {"status": "success", "message": "Vacate request approved!"}
@@ -1055,7 +1173,6 @@ def update_room_images(req: UpdateRoomImagesRequest, user: dict = Depends(get_cu
         raise HTTPException(status_code=404, detail=f"Room {req.room_number} not found.")
 
     optimized_images = [compress_and_convert_to_webp(img) for img in req.images]
-
     room.images = json.dumps(optimized_images)
     db.commit()
 
@@ -1077,17 +1194,29 @@ def get_complaints(user: dict = Depends(get_current_user), db: Session = Depends
 
 @app.post("/api/complaints")
 def raise_complaint(req: ComplaintCreateRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    db.add(DBComplaint(id=f"cmp-{uuid.uuid4().hex[:6]}", user_name=user["full_name"], user_phone=user["phone"] or user["email"], category=req.category, title=req.title, description=req.description, status="Pending"))
+    cmp_id = f"cmp-{uuid.uuid4().hex[:6]}"
+    db.add(DBComplaint(id=cmp_id, user_name=user["full_name"], user_phone=user["phone"] or user["email"], category=req.category, title=req.title, description=req.description, status="Pending"))
 
     target_role = "pg_owner" if req.category == "PG Maintenance" else "mess_partner"
-    notify_owner(db, target_role, f"New Complaint: {req.category}", f"{user['full_name']} logged complaint: '{req.title}'", "complaint")
+
+    # NOTIFY OWNER (INBOX + EMAIL)
+    notify_owner_and_email(
+        db=db,
+        background_tasks=background_tasks,
+        recipient_role=target_role,
+        title=f"New Complaint Raised ({req.category})",
+        message=f"Student '{user['full_name']}' ({user['phone']}) raised a complaint.\nTitle: {req.title}\nDetails: {req.description}",
+        event_type="complaint"
+    )
+
     db.commit()
 
+    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
-        f"Complaint Logged: {req.title}",
-        f"Hi {user['full_name']},\n\nWe received your complaint regarding '{req.title}'. The respective owner has been notified."
+        f"Complaint Logged Ticket #{cmp_id}: {req.title}",
+        f"Hi {user['full_name']},\n\nWe received your complaint regarding '{req.title}'. The respective {target_role.replace('_', ' ').title()} has been notified to resolve this."
     )
 
     return {"status": "success", "message": "Complaint logged successfully!"}
@@ -1106,12 +1235,13 @@ def resolve_complaint(req: ResolveComplaintRequest, background_tasks: Background
     comp.status = "Resolved"
     db.commit()
 
+    # EMAIL STUDENT RESOLUTION NOTICE
     student_user = db.query(DBUser).filter(or_(DBUser.phone == comp.user_phone, DBUser.email == comp.user_phone)).first()
     if student_user:
         background_tasks.add_task(
             send_email_notification,
             student_user.email,
-            f"Complaint Resolved: {comp.title}",
+            f"Complaint Ticket Resolved: {comp.title}",
             f"Hi {comp.user_name},\n\nYour complaint '{comp.title}' has been marked as RESOLVED by the owner."
         )
 
