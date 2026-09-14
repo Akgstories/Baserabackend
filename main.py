@@ -81,7 +81,7 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
 
 
 # ─── BREVO REST HTTP API EMAIL CONFIGURATION (PORT 443 HTTPS) ────────
-BREVO_API_KEY = os.getenv("BREVO_SMTP_KEY", os.getenv("BREVO_API_KEY", ""))
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", ""))
 SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "akgstories02@gmail.com")
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str):
@@ -92,8 +92,9 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str):
     if not recipient_email or "@" not in recipient_email:
         return
 
-    if not BREVO_API_KEY:
-        print(f"[BREVO EMAIL DISPATCH] To: {recipient_email} | Subject: {subject} | Body snippet: {body_text[:80]}...")
+    clean_key = BREVO_API_KEY.strip()
+    if not clean_key:
+        print(f"[BREVO EMAIL NOTICE] Missing API key. Email skipped for: {recipient_email}")
         return
 
     url = "https://api.brevo.com/v3/smtp/email"
@@ -117,7 +118,7 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str):
         data=data,
         headers={
             "accept": "application/json",
-            "api-key": BREVO_API_KEY,
+            "api-key": clean_key,
             "content-type": "application/json"
         },
         method="POST"
@@ -1291,4 +1292,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
