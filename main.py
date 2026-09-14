@@ -82,7 +82,7 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
 
 # ─── BREVO REST HTTP API EMAIL CONFIGURATION (PORT 443 HTTPS) ────────
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", ""))
-SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "akgstories02@gmail.com")
+SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "basera4you@gmail.com")
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str):
     """
