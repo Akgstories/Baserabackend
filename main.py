@@ -101,26 +101,18 @@ def log_email_event(recipient: str, subject: str, provider: str, status: str, er
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str, html_content: Optional[str] = None):
     """
-    Multi-provider email dispatcher with fallback:
-    Primary: Brevo REST HTTP API (Port 443)
-    Secondary: Gmail SMTP / Custom SMTP Server
-    Audit: Captures execution logs in memory circular buffer.
+    Multi-provider email dispatcher with automatic fallback:
+    1. Brevo REST API (for xkeysib- keys)
+    2. Brevo SMTP Relay (for xsmtpsib- keys) via smtp-relay.brevo.com:587
+    3. Gmail SMTP / Custom SMTP Server
     """
     if not recipient_email or "@" not in recipient_email:
         return
 
     clean_brevo_key = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", "")).strip()
-    gmail_user = os.getenv("GMAIL_USER", "").strip()
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    sender_email = os.getenv("BREVO_SENDER_EMAIL", os.getenv("SENDER_EMAIL", "basera4you@gmail.com")).strip()
 
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com" if gmail_user else "").strip()
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER", gmail_user).strip()
-    smtp_password = os.getenv("SMTP_PASSWORD", gmail_pass).strip()
-
-    sender_email = os.getenv("BREVO_SENDER_EMAIL", os.getenv("SENDER_EMAIL", gmail_user or "basera4you@gmail.com")).strip()
-
-    # 1. TRY BREVO REST API (HTTPS PORT 443)
+    # 1. BREVO REST API (for keys starting with xkeysib-)
     if clean_brevo_key and clean_brevo_key.startswith("xkeysib-"):
         try:
             url = "https://api.brevo.com/v3/smtp/email"
@@ -145,22 +137,50 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
             )
             with urllib.request.urlopen(req, timeout=8) as response:
                 if response.status in (200, 201):
-                    print(f"[BREVO EMAIL SUCCESS] Sent to {recipient_email}")
+                    print(f"[BREVO REST SUCCESS] Sent to {recipient_email}")
                     log_email_event(recipient_email, subject, "Brevo REST API", "SUCCESS")
                     return
                 else:
                     resp_body = response.read().decode("utf-8")
-                    print(f"[BREVO EMAIL ERROR] Status {response.status}: {resp_body}")
                     log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", f"HTTP {response.status}: {resp_body}")
         except urllib.error.HTTPError as e:
             err_text = e.read().decode("utf-8")
-            print(f"[BREVO EMAIL ERROR] HTTP {e.code}: {err_text}")
             log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", f"HTTP {e.code}: {err_text}")
         except Exception as e:
-            print(f"[BREVO EMAIL ERROR] Exception: {e}")
             log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", str(e))
 
-    # 2. FALLBACK TO SMTP (GMAIL / CUSTOM SMTP)
+    # 2. BREVO SMTP RELAY (for keys starting with xsmtpsib-)
+    if clean_brevo_key and clean_brevo_key.startswith("xsmtpsib-"):
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = f"Basera Platform <{sender_email}>"
+            msg["To"] = recipient_email
+
+            msg.attach(MIMEText(body_text, "plain"))
+            if html_content:
+                msg.attach(MIMEText(html_content, "html"))
+
+            with smtplib.SMTP("smtp-relay.brevo.com", 587, timeout=10) as server:
+                server.starttls()
+                server.login(sender_email, clean_brevo_key)
+                server.sendmail(sender_email, recipient_email, msg.as_string())
+
+            print(f"[BREVO SMTP RELAY SUCCESS] Sent to {recipient_email}")
+            log_email_event(recipient_email, subject, "Brevo SMTP Relay", "SUCCESS")
+            return
+        except Exception as e:
+            print(f"[BREVO SMTP RELAY ERROR] Failed via Brevo Relay: {e}")
+            log_email_event(recipient_email, subject, "Brevo SMTP Relay", "FAILED", str(e))
+
+    # 3. GMAIL / CUSTOM SMTP FALLBACK
+    gmail_user = os.getenv("GMAIL_USER", "").strip()
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com" if gmail_user else "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", gmail_user).strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", gmail_pass).strip()
+
     if smtp_server and smtp_user and smtp_password:
         try:
             msg = MIMEMultipart("alternative")
@@ -168,11 +188,9 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
             msg["From"] = f"Basera Platform <{smtp_user}>"
             msg["To"] = recipient_email
 
-            part1 = MIMEText(body_text, "plain")
-            msg.attach(part1)
+            msg.attach(MIMEText(body_text, "plain"))
             if html_content:
-                part2 = MIMEText(html_content, "html")
-                msg.attach(part2)
+                msg.attach(MIMEText(html_content, "html"))
 
             with smtplib.SMTP(smtp_server, smtp_port, timeout=8) as server:
                 server.starttls()
@@ -186,10 +204,8 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
             print(f"[SMTP EMAIL ERROR] Failed via {smtp_server}: {e}")
             log_email_event(recipient_email, subject, f"SMTP ({smtp_server})", "FAILED", str(e))
 
-    # 3. IF UNCONFIGURED OR ALL FAILED
-    print(f"[EMAIL DISPATCH NOTICE] No active email provider available for {recipient_email}")
-    if not (clean_brevo_key or smtp_user):
-        log_email_event(recipient_email, subject, "Unconfigured", "FAILED", "Missing Brevo API key or SMTP credentials in environment variables.")
+    print(f"[EMAIL DISPATCH NOTICE] No active email provider configured for {recipient_email}")
+    log_email_event(recipient_email, subject, "Unconfigured", "FAILED", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
 
 
 # ─── SQLALCHEMY ORM MODELS ────────────────────────────────────────
@@ -337,7 +353,6 @@ def seed_database():
         inspector = inspect(engine)
 
         with engine.connect() as conn:
-            # Check columns dynamically to avoid SQLite OperationalError near "EXISTS"
             if "pg_rooms" in inspector.get_table_names():
                 cols = [c["name"] for c in inspector.get_columns("pg_rooms")]
                 if "images" not in cols:
@@ -424,7 +439,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.3.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.4.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -1335,14 +1350,16 @@ def get_email_status(user: dict = Depends(get_current_user)):
     gmail_user = os.getenv("GMAIL_USER", "").strip()
     smtp_server = os.getenv("SMTP_SERVER", "").strip()
 
-    brevo_active = bool(brevo_key and brevo_key.startswith("xkeysib-"))
+    brevo_rest_active = bool(brevo_key and brevo_key.startswith("xkeysib-"))
+    brevo_smtp_active = bool(brevo_key and brevo_key.startswith("xsmtpsib-"))
     smtp_active = bool((gmail_user and os.getenv("GMAIL_APP_PASSWORD")) or (smtp_server and os.getenv("SMTP_USER")))
 
     return {
         "status": "success",
         "providers": {
             "brevo_api": {
-                "configured": brevo_active,
+                "configured": brevo_rest_active or brevo_smtp_active,
+                "type": "Brevo SMTP Relay" if brevo_smtp_active else ("Brevo REST API" if brevo_rest_active else "Not set"),
                 "sender": os.getenv("BREVO_SENDER_EMAIL", "basera4you@gmail.com")
             },
             "smtp": {
@@ -1383,4 +1400,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
 
- 
