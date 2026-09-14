@@ -1,14 +1,13 @@
 import os
 import uuid
 import json
-import smtplib
 import io
 import base64
 import hmac
 import hashlib
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from typing import List, Optional
 
 import razorpay
@@ -81,42 +80,59 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
         return base64_data
 
 
-# ─── BREVO SMTP EMAIL CONFIGURATION ──────────────────────────────────
-SMTP_SERVER = os.getenv("BREVO_SMTP_SERVER", "smtp-relay.brevo.com")
-SMTP_PORT = int(os.getenv("BREVO_SMTP_PORT", "587"))
-SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "no-reply@baseras.in")
-SENDER_PASSWORD = os.getenv("BREVO_SMTP_KEY", "")
+# ─── BREVO REST HTTP API EMAIL CONFIGURATION (PORT 443 HTTPS) ────────
+BREVO_API_KEY = os.getenv("BREVO_SMTP_KEY", os.getenv("BREVO_API_KEY", ""))
+SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "akgstories02@gmail.com")
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str):
     """
-    Dispatches automated transactional email alerts using Brevo SMTP.
-    Supports both Port 465 (SSL) and Port 587 (TLS).
+    Dispatches transactional emails via Brevo REST HTTP API (Port 443).
+    Bypasses SMTP socket timeouts and port blocks on free cloud servers like Render.
     """
     if not recipient_email or "@" not in recipient_email:
         return
 
-    if not SENDER_PASSWORD:
+    if not BREVO_API_KEY:
         print(f"[BREVO EMAIL DISPATCH] To: {recipient_email} | Subject: {subject} | Body snippet: {body_text[:80]}...")
         return
 
+    url = "https://api.brevo.com/v3/smtp/email"
+    payload = {
+        "sender": {
+            "name": "Basera Platform",
+            "email": SENDER_EMAIL
+        },
+        "to": [
+            {
+                "email": recipient_email
+            }
+        ],
+        "subject": subject,
+        "textContent": body_text
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json"
+        },
+        method="POST"
+    )
+
     try:
-        msg = MIMEMultipart()
-        msg["From"] = f"Basera Platform <{SENDER_EMAIL}>"
-        msg["To"] = recipient_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body_text, "plain"))
-
-        # Port 465 uses SSL directly; Port 587 uses STARTTLS
-        if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=15)
-        else:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15)
-            server.starttls()
-
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"[BREVO EMAIL SUCCESS] Sent to {recipient_email}")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status in (200, 201):
+                print(f"[BREVO EMAIL SUCCESS] Sent to {recipient_email}")
+            else:
+                resp_body = response.read().decode("utf-8")
+                print(f"[BREVO EMAIL ERROR] Status {response.status}: {resp_body}")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        print(f"[BREVO EMAIL ERROR] HTTP {e.code}: {error_body}")
     except Exception as e:
         print(f"[BREVO EMAIL ERROR] Failed to send to {recipient_email}: {e}")
 
@@ -342,7 +358,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.1.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.2.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -1275,3 +1291,4 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
