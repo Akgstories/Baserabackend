@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, DateTime, or_, and_
+from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, DateTime, or_, and_, text
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase, Mapped, mapped_column
 
 # ─── DATABASE CONFIGURATION ─────────────────────────────────────────
@@ -50,7 +50,6 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
         image_bytes = base64.b64decode(encoded)
         img = Image.open(io.BytesIO(image_bytes))
 
-        # Convert palette/transparent modes to RGB for standard WebP output
         if img.mode in ("RGBA", "P", "LA"):
             background = Image.new("RGB", img.size, (255, 255, 255))
             if img.mode in ("RGBA", "LA"):
@@ -61,10 +60,8 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
         elif img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Resize image preserving aspect ratio
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
 
-        # Export as compressed WebP
         buffer = io.BytesIO()
         img.save(buffer, format="WEBP", quality=quality, optimize=True)
         compressed_encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -134,6 +131,7 @@ class DBPGListing(Base):
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=Chandankiyari+Bokaro")
     rating: Mapped[str] = mapped_column(String, nullable=False)
     amenities: Mapped[str] = mapped_column(Text, nullable=False)
+    images: Mapped[str] = mapped_column(Text, default="[]")  # JSON Array of property/room WebP images
 
 class DBMessListing(Base):
     __tablename__ = "mess_listings"
@@ -246,6 +244,13 @@ class DBNotification(Base):
 def seed_database():
     try:
         Base.metadata.create_all(bind=engine)
+
+        # Auto-migrate PostgreSQL columns if missing
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]';"))
+            conn.execute(text("ALTER TABLE pg_listings ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]';"))
+            conn.commit()
+
         db = SessionLocal()
         admin_user = db.query(DBUser).filter(DBUser.role == "admin").first()
         if not admin_user:
@@ -272,14 +277,14 @@ def seed_database():
                     gender_pref="Boys PG", sharing="Double Sharing", has_ac=True, monthly_price=4200,
                     tag_label="Vacant", address="📍 Vill-Ghoragara, P.O-Kherabera, Chandankiyari",
                     google_map_url="https://maps.google.com/?q=23.5750,86.3500",
-                    rating="4.9 (28)", amenities=json.dumps(["Wi-Fi", "Homely Mess", "Power Backup"])
+                    rating="4.9 (28)", amenities=json.dumps(["Wi-Fi", "Homely Mess", "Power Backup"]), images="[]"
                 ),
                 DBPGListing(
                     id="pg-2", name="Chandankiyari Comfort Girls PG", distance_km=0.2,
                     gender_pref="Girls PG", sharing="Single Room", has_ac=True, monthly_price=4800,
                     tag_label="1 left", address="📍 P.O-Kherabera, Chandankiyari, Bokaro",
                     google_map_url="https://maps.google.com/?q=23.5780,86.3520",
-                    rating="4.8 (19)", amenities=json.dumps(["CCTV", "3-Time Food", "Geyser"])
+                    rating="4.8 (19)", amenities=json.dumps(["CCTV", "3-Time Food", "Geyser"]), images="[]"
                 )
             ])
 
@@ -608,15 +613,38 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
         q = f"%{search.lower().strip()}%"
         query = query.filter(or_(DBPGListing.name.ilike(q), DBPGListing.address.ilike(q)))
 
-    return [
-        {
-            "id": l.id, "name": l.name, "distance_km": l.distance_km, "gender_pref": l.gender_pref,
-            "sharing": l.sharing, "has_ac": l.has_ac, "monthly_price": l.monthly_price,
-            "tag_label": l.tag_label, "address": l.address, "google_map_url": l.google_map_url, "rating": l.rating,
-            "amenities": json.loads(l.amenities) if l.amenities else []
-        }
-        for l in query.all()
-    ]
+    # Fetch room photos fallback
+    all_rooms = db.query(DBPGRoom).all()
+    room_images = []
+    for r in all_rooms:
+        if r.images:
+            try:
+                room_images.extend(json.loads(r.images))
+            except Exception:
+                pass
+
+    result = []
+    for l in query.all():
+        pg_imgs = json.loads(l.images) if l.images else []
+        combined_imgs = pg_imgs if pg_imgs else room_images[:5]
+
+        result.append({
+            "id": l.id,
+            "name": l.name,
+            "distance_km": l.distance_km,
+            "gender_pref": l.gender_pref,
+            "sharing": l.sharing,
+            "has_ac": l.has_ac,
+            "monthly_price": l.monthly_price,
+            "tag_label": l.tag_label,
+            "address": l.address,
+            "google_map_url": l.google_map_url,
+            "rating": l.rating,
+            "amenities": json.loads(l.amenities) if l.amenities else [],
+            "images": combined_imgs
+        })
+
+    return result
 
 @app.post("/api/mess/cancel-meal")
 def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -925,7 +953,6 @@ def update_room_images(req: UpdateRoomImagesRequest, user: dict = Depends(get_cu
     if not room:
         raise HTTPException(status_code=404, detail=f"Room {req.room_number} not found.")
 
-    # Automatically resize and convert each photo to WebP format
     optimized_images = [compress_and_convert_to_webp(img) for img in req.images]
 
     room.images = json.dumps(optimized_images)
