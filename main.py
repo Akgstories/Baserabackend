@@ -103,7 +103,7 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
     """
     Multi-provider email dispatcher with automatic fallback:
     1. Brevo REST API (for xkeysib- keys)
-    2. Brevo SMTP Relay (for xsmtpsib- keys) via smtp-relay.brevo.com:587
+    2. Brevo SMTP Relay (for xsmtpsib- keys) via SSL (smtp-relay.brevo.com:465)
     3. Gmail SMTP / Custom SMTP Server
     """
     if not recipient_email or "@" not in recipient_email:
@@ -161,12 +161,12 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
             if html_content:
                 msg.attach(MIMEText(html_content, "html"))
 
-            with smtplib.SMTP("smtp-relay.brevo.com", 587, timeout=10) as server:
-                server.starttls()
+            # Uses implicit SSL on Port 465 to bypass port 587 timeouts on cloud hosting
+            with smtplib.SMTP_SSL("smtp-relay.brevo.com", 465, timeout=12) as server:
                 server.login(sender_email, clean_brevo_key)
                 server.sendmail(sender_email, recipient_email, msg.as_string())
 
-            print(f"[BREVO SMTP RELAY SUCCESS] Sent to {recipient_email}")
+            print(f"[BREVO SMTP RELAY SUCCESS] Sent to {recipient_email} via Port 465 SSL")
             log_email_event(recipient_email, subject, "Brevo SMTP Relay", "SUCCESS")
             return
         except Exception as e:
@@ -1399,4 +1399,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
