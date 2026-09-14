@@ -90,6 +90,7 @@ SENDER_PASSWORD = os.getenv("BREVO_SMTP_KEY", "")
 def send_email_notification(recipient_email: str, subject: str, body_text: str):
     """
     Dispatches automated transactional email alerts using Brevo SMTP.
+    Supports both Port 465 (SSL) and Port 587 (TLS).
     """
     if not recipient_email or "@" not in recipient_email:
         return
@@ -105,8 +106,13 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str):
         msg["Subject"] = subject
         msg.attach(MIMEText(body_text, "plain"))
 
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
+        # Port 465 uses SSL directly; Port 587 uses STARTTLS
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=15)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15)
+            server.starttls()
+
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
         server.quit()
