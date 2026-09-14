@@ -102,18 +102,28 @@ def log_email_event(recipient: str, subject: str, provider: str, status: str, er
 def send_email_notification(recipient_email: str, subject: str, body_text: str, html_content: Optional[str] = None):
     """
     Multi-provider email dispatcher with automatic fallback:
-    1. Brevo REST API (for xkeysib- keys)
-    2. Brevo SMTP Relay (for xsmtpsib- keys) via SSL (smtp-relay.brevo.com:465)
-    3. Gmail SMTP / Custom SMTP Server
+    1. Brevo REST API (for xkeysib- keys) -> Port 443 HTTPS (Never blocked by cloud hosts)
+    2. Brevo SMTP Relay (for xsmtpsib- keys) -> Ports 587 / 465
+    3. Gmail SMTP / Custom SMTP Fallback
     """
     if not recipient_email or "@" not in recipient_email:
         return
 
     clean_brevo_key = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", "")).strip()
     sender_email = os.getenv("BREVO_SENDER_EMAIL", os.getenv("SENDER_EMAIL", "basera4you@gmail.com")).strip()
+    
+    gmail_user = os.getenv("GMAIL_USER", "").strip()
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com" if gmail_user else "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", gmail_user).strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", gmail_pass).strip()
 
-    # 1. BREVO REST API (for keys starting with xkeysib-)
+    dispatch_attempted = False
+
+    # 1. BREVO REST API (Port 443 HTTPS - Recommended for Render)
     if clean_brevo_key and clean_brevo_key.startswith("xkeysib-"):
+        dispatch_attempted = True
         try:
             url = "https://api.brevo.com/v3/smtp/email"
             payload = {
@@ -135,7 +145,7 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
                 },
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=8) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 if response.status in (200, 201):
                     print(f"[BREVO REST SUCCESS] Sent to {recipient_email}")
                     log_email_event(recipient_email, subject, "Brevo REST API", "SUCCESS")
@@ -151,51 +161,56 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
 
     # 2. BREVO SMTP RELAY (for keys starting with xsmtpsib-)
     if clean_brevo_key and clean_brevo_key.startswith("xsmtpsib-"):
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = f"Basera Platform <{sender_email}>"
-            msg["To"] = recipient_email
+        dispatch_attempted = True
+        for port, use_ssl in [(465, True), (587, False)]:
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = f"Basera Platform <{sender_email}>"
+                msg["To"] = recipient_email
+                msg.attach(MIMEText(body_text, "plain"))
+                if html_content:
+                    msg.attach(MIMEText(html_content, "html"))
 
-            msg.attach(MIMEText(body_text, "plain"))
-            if html_content:
-                msg.attach(MIMEText(html_content, "html"))
+                if use_ssl:
+                    with smtplib.SMTP_SSL("smtp-relay.brevo.com", port, timeout=6) as server:
+                        server.login(sender_email, clean_brevo_key)
+                        server.sendmail(sender_email, recipient_email, msg.as_string())
+                else:
+                    with smtplib.SMTP("smtp-relay.brevo.com", port, timeout=6) as server:
+                        server.starttls()
+                        server.login(sender_email, clean_brevo_key)
+                        server.sendmail(sender_email, recipient_email, msg.as_string())
 
-            # Uses implicit SSL on Port 465 to bypass port 587 timeouts on cloud hosting
-            with smtplib.SMTP_SSL("smtp-relay.brevo.com", 465, timeout=12) as server:
-                server.login(sender_email, clean_brevo_key)
-                server.sendmail(sender_email, recipient_email, msg.as_string())
-
-            print(f"[BREVO SMTP RELAY SUCCESS] Sent to {recipient_email} via Port 465 SSL")
-            log_email_event(recipient_email, subject, "Brevo SMTP Relay", "SUCCESS")
-            return
-        except Exception as e:
-            print(f"[BREVO SMTP RELAY ERROR] Failed via Brevo Relay: {e}")
-            log_email_event(recipient_email, subject, "Brevo SMTP Relay", "FAILED", str(e))
+                print(f"[BREVO SMTP SUCCESS] Sent to {recipient_email} via Port {port}")
+                log_email_event(recipient_email, subject, "Brevo SMTP Relay", "SUCCESS")
+                return
+            except Exception as e:
+                print(f"[BREVO SMTP NOTICE] Port {port} failed: {e}")
+        
+        log_email_event(recipient_email, subject, "Brevo SMTP Relay", "FAILED", "Render blocked outbound SMTP ports 587/465. Switch to a REST API key (xkeysib-).")
 
     # 3. GMAIL / CUSTOM SMTP FALLBACK
-    gmail_user = os.getenv("GMAIL_USER", "").strip()
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip()
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com" if gmail_user else "").strip()
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER", gmail_user).strip()
-    smtp_password = os.getenv("SMTP_PASSWORD", gmail_pass).strip()
-
     if smtp_server and smtp_user and smtp_password:
+        dispatch_attempted = True
         try:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
             msg["From"] = f"Basera Platform <{smtp_user}>"
             msg["To"] = recipient_email
-
             msg.attach(MIMEText(body_text, "plain"))
             if html_content:
                 msg.attach(MIMEText(html_content, "html"))
 
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=8) as server:
-                server.starttls()
-                server.login(smtp_user, smtp_password)
-                server.sendmail(smtp_user, recipient_email, msg.as_string())
+            if smtp_port == 465:
+                with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=8) as server:
+                    server.login(smtp_user, smtp_password)
+                    server.sendmail(smtp_user, recipient_email, msg.as_string())
+            else:
+                with smtplib.SMTP(smtp_server, smtp_port, timeout=8) as server:
+                    server.starttls()
+                    server.login(smtp_user, smtp_password)
+                    server.sendmail(smtp_user, recipient_email, msg.as_string())
 
             print(f"[SMTP EMAIL SUCCESS] Sent to {recipient_email} via {smtp_server}")
             log_email_event(recipient_email, subject, f"SMTP ({smtp_server})", "SUCCESS")
@@ -204,8 +219,9 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
             print(f"[SMTP EMAIL ERROR] Failed via {smtp_server}: {e}")
             log_email_event(recipient_email, subject, f"SMTP ({smtp_server})", "FAILED", str(e))
 
-    print(f"[EMAIL DISPATCH NOTICE] No active email provider configured for {recipient_email}")
-    log_email_event(recipient_email, subject, "Unconfigured", "FAILED", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
+    if not dispatch_attempted:
+        print(f"[EMAIL DISPATCH NOTICE] No active email provider configured for {recipient_email}")
+        log_email_event(recipient_email, subject, "Unconfigured", "FAILED", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
 
 
 # ─── SQLALCHEMY ORM MODELS ────────────────────────────────────────
@@ -1359,7 +1375,7 @@ def get_email_status(user: dict = Depends(get_current_user)):
         "providers": {
             "brevo_api": {
                 "configured": brevo_rest_active or brevo_smtp_active,
-                "type": "Brevo SMTP Relay" if brevo_smtp_active else ("Brevo REST API" if brevo_rest_active else "Not set"),
+                "type": "Brevo REST API (Port 443)" if brevo_rest_active else ("Brevo SMTP Relay" if brevo_smtp_active else "Not set"),
                 "sender": os.getenv("BREVO_SENDER_EMAIL", "basera4you@gmail.com")
             },
             "smtp": {
