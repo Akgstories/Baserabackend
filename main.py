@@ -2,10 +2,14 @@ import os
 import uuid
 import json
 import smtplib
+import io
+import base64
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Optional
+
+from PIL import Image
 
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +22,6 @@ from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase, Mapped, mappe
 # ─── DATABASE CONFIGURATION ─────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./basera.db")
 
-# Convert legacy postgres:// to postgresql:// for SQLAlchemy
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -33,6 +36,45 @@ class Base(DeclarativeBase):
     pass
 
 
+# ─── AUTOMATIC IMAGE CONVERSION & COMPRESSION ENGINE ─────────────────
+def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), quality=75) -> str:
+    """
+    Automatically resizes and converts base64 image data to lightweight WebP format.
+    Reduces 5MB+ phone photos down to ~40-80KB for maximum web efficiency.
+    """
+    if not base64_data or not base64_data.startswith("data:image"):
+        return base64_data
+
+    try:
+        header, encoded = base64_data.split(",", 1)
+        image_bytes = base64.b64decode(encoded)
+        img = Image.open(io.BytesIO(image_bytes))
+
+        # Convert palette/transparent modes to RGB for standard WebP output
+        if img.mode in ("RGBA", "P", "LA"):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode in ("RGBA", "LA"):
+                background.paste(img, mask=img.split()[-1])
+            else:
+                background.paste(img)
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # Resize image preserving aspect ratio
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+        # Export as compressed WebP
+        buffer = io.BytesIO()
+        img.save(buffer, format="WEBP", quality=quality, optimize=True)
+        compressed_encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        return f"data:image/webp;base64,{compressed_encoded}"
+    except Exception as e:
+        print(f"[IMAGE COMPRESSION NOTICE] Fallback to raw data: {e}")
+        return base64_data
+
+
 # ─── BREVO SMTP EMAIL CONFIGURATION ──────────────────────────────────
 SMTP_SERVER = os.getenv("BREVO_SMTP_SERVER", "smtp-relay.brevo.com")
 SMTP_PORT = int(os.getenv("BREVO_SMTP_PORT", "587"))
@@ -40,11 +82,9 @@ SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "no-reply@baseras.in")
 SENDER_PASSWORD = os.getenv("BREVO_SMTP_KEY", "")
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str):
-    """Sends transactional email alerts using Brevo SMTP."""
     if not recipient_email or "@" not in recipient_email:
         return
 
-    # Fallback log if environment SMTP key is not set
     if not SENDER_PASSWORD:
         print(f"[BREVO MOCK ALERT] To: {recipient_email} | Subject: {subject} | Body: {body_text[:70]}...")
         return
@@ -117,6 +157,7 @@ class DBPGRoom(Base):
     tenant_address: Mapped[str] = mapped_column(String, default="-")
     monthly_rent: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, default="vacant")
+    images: Mapped[str] = mapped_column(Text, default="[]")  # JSON Array of WebP base64 images (Max 5)
 
 class DBVacateRequest(Base):
     __tablename__ = "vacate_requests"
@@ -262,8 +303,8 @@ def seed_database():
 
         if not db.query(DBPGRoom).first():
             db.add_all([
-                DBPGRoom(room_number="101", room_type="Single AC", tenant_name="Rahul Kumar", tenant_phone="9876543210", tenant_address="GEC Bokaro Hostel Block A", monthly_rent=8000, status="occupied"),
-                DBPGRoom(room_number="102", room_type="Double Non-AC", tenant_name="-", tenant_phone="-", tenant_address="-", monthly_rent=5200, status="vacant")
+                DBPGRoom(room_number="101", room_type="Single AC", tenant_name="Rahul Kumar", tenant_phone="9876543210", tenant_address="GEC Bokaro Hostel Block A", monthly_rent=8000, status="occupied", images="[]"),
+                DBPGRoom(room_number="102", room_type="Double Non-AC", tenant_name="-", tenant_phone="-", tenant_address="-", monthly_rent=5200, status="vacant", images="[]")
             ])
 
         if not db.query(DBMessStudent).first():
@@ -279,14 +320,11 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="12.2.0")
+app = FastAPI(title="Basera Multi-Portal API", version="12.3.0")
 
-# ─── UNIVERSAL DYNAMIC CORS MIDDLEWARE ─────────────────────────────
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
     origin = request.headers.get("origin", "*")
-    
-    # Preemptively answer OPTIONS preflight requests
     if request.method == "OPTIONS":
         response = Response(status_code=200)
         response.headers["Access-Control-Allow-Origin"] = origin
@@ -381,6 +419,10 @@ class AddRoomRequest(BaseModel):
     room_number: str
     room_type: str
     monthly_rent: int
+
+class UpdateRoomImagesRequest(BaseModel):
+    room_number: str
+    images: List[str]  # Up to 5 base64 image strings
 
 class ComplaintCreateRequest(BaseModel):
     category: str
@@ -850,13 +892,46 @@ def approve_vacate_request(req: ApproveVacateRequest, background_tasks: Backgrou
 
 @app.get("/api/rooms")
 def get_rooms(db: Session = Depends(get_db)):
-    return [{"room_number": r.room_number, "room_type": r.room_type, "tenant_name": r.tenant_name, "tenant_phone": r.tenant_phone, "tenant_address": r.tenant_address, "monthly_rent": r.monthly_rent, "status": r.status} for r in db.query(DBPGRoom).all()]
+    rooms = db.query(DBPGRoom).all()
+    return [
+        {
+            "room_number": r.room_number,
+            "room_type": r.room_type,
+            "tenant_name": r.tenant_name,
+            "tenant_phone": r.tenant_phone,
+            "tenant_address": r.tenant_address,
+            "monthly_rent": r.monthly_rent,
+            "status": r.status,
+            "images": json.loads(r.images) if r.images else []
+        }
+        for r in rooms
+    ]
 
 @app.post("/api/pg/add-room")
 def add_room(req: AddRoomRequest, db: Session = Depends(get_db)):
-    db.add(DBPGRoom(room_number=req.room_number, room_type=req.room_type, monthly_rent=req.monthly_rent, status="vacant"))
+    db.add(DBPGRoom(room_number=req.room_number, room_type=req.room_type, monthly_rent=req.monthly_rent, status="vacant", images="[]"))
     db.commit()
     return {"status": "success", "message": "Room added."}
+
+@app.post("/api/pg/update-room-images")
+def update_room_images(req: UpdateRoomImagesRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] not in ["pg_owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized. Only PG owners can manage room photos.")
+
+    if len(req.images) > 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 images allowed per room.")
+
+    room = db.query(DBPGRoom).filter(DBPGRoom.room_number == req.room_number).first()
+    if not room:
+        raise HTTPException(status_code=404, detail=f"Room {req.room_number} not found.")
+
+    # Automatically resize and convert each photo to WebP format
+    optimized_images = [compress_and_convert_to_webp(img) for img in req.images]
+
+    room.images = json.dumps(optimized_images)
+    db.commit()
+
+    return {"status": "success", "message": f"Successfully optimized and saved {len(optimized_images)} photo(s) for Room {req.room_number}!", "images": optimized_images}
 
 @app.get("/api/complaints")
 def get_complaints(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
