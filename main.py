@@ -9,6 +9,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, DateTime, or_, and_
@@ -280,23 +281,22 @@ def seed_database():
 
 app = FastAPI(title="Basera Multi-Portal API", version="12.2.0")
 
-# ─── CORS CONFIGURATION FOR PRODUCTION & LOCAL DOMAINS ──────────────
-origins = [
-    "https://baseras.in",
-    "https://www.baseras.in",
-    "http://localhost:3000",
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-]
-
+# ─── FAIL-SAFE CORS CONFIGURATION ───────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Backend Error: {str(exc)}"},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 @app.on_event("startup")
 def on_startup():
