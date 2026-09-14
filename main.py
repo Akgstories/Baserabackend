@@ -334,7 +334,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="12.4.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.0.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -659,7 +659,7 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
 
     return result
 
-# ─── RAZORPAY PAYMENT ENDPOINTS ─────────────────────────────────────
+# ─── UNIVERSAL RAZORPAY PAYMENT ENDPOINTS ─────────────────────────
 @app.post("/api/payments/create-order")
 def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user)):
     """Generates a secure Razorpay Order ID for online checkout."""
@@ -674,7 +674,7 @@ def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_curre
                 "item_name": req.item_name
             }
         }
-        order = razorpay_client.order.create(data=order_data) # type: ignore
+        order = razorpay_client.order.create(data=order_data)  # type: ignore
         return {
             "status": "success",
             "order_id": order["id"],
@@ -686,13 +686,13 @@ def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_curre
         raise HTTPException(status_code=500, detail=f"Failed to create payment order: {str(e)}")
 
 @app.post("/api/payments/verify")
-def verify_payment_and_book(
+def verify_payment_and_fulfill(
     req: VerifyPaymentRequest, 
     background_tasks: BackgroundTasks, 
     user: dict = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """Cryptographically verifies Razorpay HMAC SHA-256 signature and records room booking."""
+    """Cryptographically verifies Razorpay HMAC SHA-256 signature and fulfills PG Bookings or Mess Subscriptions."""
     generated_signature = hmac.new(
         RAZORPAY_KEY_SECRET.encode(),
         f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode(),
@@ -709,15 +709,18 @@ def verify_payment_and_book(
         payer_phone=user["phone"] or user["email"],
         amount=req.monthly_amount,
         payment_method="Razorpay (UPI/Card/NetBanking)",
-        description=f"Booking - {req.item_name}",
+        description=f"Paid for: {req.item_name}",
         date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ))
 
+    is_mess_item = "Mess" in req.item_name
+    target_type = "Mess Subscription" if is_mess_item else "PG Room"
+
     booking_id = f"b-{uuid.uuid4().hex[:8]}"
-    new_b = DBBooking(
+    db.add(DBBooking(
         id=booking_id,
         user_phone=user["phone"] or user["email"],
-        target_type="PG Room",
+        target_type=target_type,
         item_name=req.item_name,
         move_in_date=req.move_in_date,
         special_requests=req.special_requests or "",
@@ -725,27 +728,49 @@ def verify_payment_and_book(
         payment_method="Razorpay",
         transaction_id=txn_id,
         status="Active"
-    )
-    db.add(new_b)
+    ))
 
-    vacant_room = db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").first()
-    if vacant_room:
-        vacant_room.status = "occupied"
-        vacant_room.tenant_name = user["full_name"]
-        vacant_room.tenant_phone = user["phone"]
-        vacant_room.tenant_address = user["address"]
+    if is_mess_item:
+        ms = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
+        new_expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        if ms:
+            ms.is_active = True
+            ms.base_price = req.monthly_amount
+            ms.expiry_date = new_expiry
+            ms.plan = req.item_name
+        else:
+            db.add(DBMessStudent(
+                id=f"ms-{uuid.uuid4().hex[:6]}",
+                name=user["full_name"],
+                phone=user["phone"] or "9155118661",
+                address=user["address"] or "Hostel",
+                google_map_url=user["google_map_url"] or "",
+                plan=req.item_name,
+                diet="Veg/Non-Veg",
+                base_price=req.monthly_amount,
+                is_active=True,
+                expiry_date=new_expiry
+            ))
+        notify_owner(db, "mess_partner", "Paid Mess Subscription Confirmed", f"{user['full_name']} paid ₹{req.monthly_amount} for {req.item_name}.", "mess_payment")
+    else:
+        vacant_room = db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").first()
+        if vacant_room:
+            vacant_room.status = "occupied"
+            vacant_room.tenant_name = user["full_name"]
+            vacant_room.tenant_phone = user["phone"]
+            vacant_room.tenant_address = user["address"]
+        notify_owner(db, "pg_owner", "Paid Room Booking Confirmed", f"{user['full_name']} paid ₹{req.monthly_amount} for {req.item_name}.", "booking")
 
-    notify_owner(db, "pg_owner", "Paid Room Booking Confirmed", f"{user['full_name']} paid ₹{req.monthly_amount} for {req.item_name}.", "booking")
     db.commit()
 
     background_tasks.add_task(
         send_email_notification,
         user["email"],
-        f"Payment & Booking Receipt: {req.item_name}",
-        f"Hi {user['full_name']},\n\nPayment Successful!\nTransaction ID: {txn_id}\nAmount Paid: ₹{req.monthly_amount}\nMove-in Date: {req.move_in_date}"
+        f"Payment & Service Receipt: {req.item_name}",
+        f"Hi {user['full_name']},\n\nPayment Successful!\nTransaction ID: {txn_id}\nAmount Paid: ₹{req.monthly_amount}\nService: {req.item_name}\nEffective Date: {req.move_in_date}"
     )
 
-    return {"status": "success", "message": "Payment verified successfully! Your booking is confirmed."}
+    return {"status": "success", "message": f"Payment verified successfully! {req.item_name} activated."}
 
 @app.post("/api/mess/cancel-meal")
 def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1114,5 +1139,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
-
