@@ -4,11 +4,14 @@ import json
 import smtplib
 import io
 import base64
+import hmac
+import hashlib
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Optional
 
+import razorpay
 from PIL import Image
 
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks, Request
@@ -34,6 +37,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class Base(DeclarativeBase):
     pass
+
+
+# ─── RAZORPAY PAYMENT CLIENT SETUP ──────────────────────────────────
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "rzp_test_YOUR_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "YOUR_SECRET_KEY")
+
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 
 # ─── AUTOMATIC IMAGE CONVERSION & COMPRESSION ENGINE ─────────────────
@@ -131,7 +141,7 @@ class DBPGListing(Base):
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=Chandankiyari+Bokaro")
     rating: Mapped[str] = mapped_column(String, nullable=False)
     amenities: Mapped[str] = mapped_column(Text, nullable=False)
-    images: Mapped[str] = mapped_column(Text, default="[]")  # JSON Array of property/room WebP images
+    images: Mapped[str] = mapped_column(Text, default="[]")
 
 class DBMessListing(Base):
     __tablename__ = "mess_listings"
@@ -155,7 +165,7 @@ class DBPGRoom(Base):
     tenant_address: Mapped[str] = mapped_column(String, default="-")
     monthly_rent: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, default="vacant")
-    images: Mapped[str] = mapped_column(Text, default="[]")  # JSON Array of WebP base64 images (Max 5)
+    images: Mapped[str] = mapped_column(Text, default="[]")
 
 class DBVacateRequest(Base):
     __tablename__ = "vacate_requests"
@@ -206,7 +216,7 @@ class DBBooking(Base):
     move_in_date: Mapped[str] = mapped_column(String, nullable=False)
     special_requests: Mapped[str] = mapped_column(Text, default="")
     monthly_amount: Mapped[int] = mapped_column(Integer, nullable=False)
-    payment_method: Mapped[str] = mapped_column(String, default="UPI")
+    payment_method: Mapped[str] = mapped_column(String, default="Razorpay")
     transaction_id: Mapped[str] = mapped_column(String, default="")
     status: Mapped[str] = mapped_column(String, default="Active")
 
@@ -245,7 +255,6 @@ def seed_database():
     try:
         Base.metadata.create_all(bind=engine)
 
-        # Auto-migrate PostgreSQL columns if missing
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]';"))
             conn.execute(text("ALTER TABLE pg_listings ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]';"))
@@ -325,7 +334,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="12.3.0")
+app = FastAPI(title="Basera Multi-Portal API", version="12.4.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -406,13 +415,18 @@ class WeeklyMenuUpdateRequest(BaseModel):
     lunch: str
     dinner: str
 
-class BookingCreateWithPaymentRequest(BaseModel):
-    target_type: str
+class CreateOrderRequest(BaseModel):
+    amount: int
     item_name: str
+
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    item_name: str
+    monthly_amount: int
     move_in_date: str
     special_requests: Optional[str] = ""
-    monthly_amount: int
-    payment_method: str
 
 class RequestStudentVacate(BaseModel):
     booking_id: str
@@ -427,7 +441,7 @@ class AddRoomRequest(BaseModel):
 
 class UpdateRoomImagesRequest(BaseModel):
     room_number: str
-    images: List[str]  # Up to 5 base64 image strings
+    images: List[str]
 
 class ComplaintCreateRequest(BaseModel):
     category: str
@@ -613,7 +627,6 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
         q = f"%{search.lower().strip()}%"
         query = query.filter(or_(DBPGListing.name.ilike(q), DBPGListing.address.ilike(q)))
 
-    # Fetch room photos fallback
     all_rooms = db.query(DBPGRoom).all()
     room_images = []
     for r in all_rooms:
@@ -645,6 +658,94 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
         })
 
     return result
+
+# ─── RAZORPAY PAYMENT ENDPOINTS ─────────────────────────────────────
+@app.post("/api/payments/create-order")
+def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user)):
+    """Generates a secure Razorpay Order ID for online checkout."""
+    try:
+        order_data = {
+            "amount": req.amount * 100,  # Razorpay expects amount in paise
+            "currency": "INR",
+            "receipt": f"rcpt_{uuid.uuid4().hex[:8]}",
+            "notes": {
+                "user_id": user["id"],
+                "student_name": user["full_name"],
+                "item_name": req.item_name
+            }
+        }
+        order = razorpay_client.order.create(data=order_data) # type: ignore
+        return {
+            "status": "success",
+            "order_id": order["id"],
+            "amount": order["amount"],
+            "currency": order["currency"],
+            "key_id": RAZORPAY_KEY_ID
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create payment order: {str(e)}")
+
+@app.post("/api/payments/verify")
+def verify_payment_and_book(
+    req: VerifyPaymentRequest, 
+    background_tasks: BackgroundTasks, 
+    user: dict = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """Cryptographically verifies Razorpay HMAC SHA-256 signature and records room booking."""
+    generated_signature = hmac.new(
+        RAZORPAY_KEY_SECRET.encode(),
+        f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if generated_signature != req.razorpay_signature:
+        raise HTTPException(status_code=400, detail="Payment verification failed! Invalid signature.")
+
+    txn_id = req.razorpay_payment_id
+    db.add(DBPaymentReceipt(
+        transaction_id=txn_id,
+        payer_name=user["full_name"],
+        payer_phone=user["phone"] or user["email"],
+        amount=req.monthly_amount,
+        payment_method="Razorpay (UPI/Card/NetBanking)",
+        description=f"Booking - {req.item_name}",
+        date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+
+    booking_id = f"b-{uuid.uuid4().hex[:8]}"
+    new_b = DBBooking(
+        id=booking_id,
+        user_phone=user["phone"] or user["email"],
+        target_type="PG Room",
+        item_name=req.item_name,
+        move_in_date=req.move_in_date,
+        special_requests=req.special_requests or "",
+        monthly_amount=req.monthly_amount,
+        payment_method="Razorpay",
+        transaction_id=txn_id,
+        status="Active"
+    )
+    db.add(new_b)
+
+    vacant_room = db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").first()
+    if vacant_room:
+        vacant_room.status = "occupied"
+        vacant_room.tenant_name = user["full_name"]
+        vacant_room.tenant_phone = user["phone"]
+        vacant_room.tenant_address = user["address"]
+
+    notify_owner(db, "pg_owner", "Paid Room Booking Confirmed", f"{user['full_name']} paid ₹{req.monthly_amount} for {req.item_name}.", "booking")
+    db.commit()
+
+    background_tasks.add_task(
+        send_email_notification,
+        user["email"],
+        f"Payment & Booking Receipt: {req.item_name}",
+        f"Hi {user['full_name']},\n\nPayment Successful!\nTransaction ID: {txn_id}\nAmount Paid: ₹{req.monthly_amount}\nMove-in Date: {req.move_in_date}"
+    )
+
+    return {"status": "success", "message": "Payment verified successfully! Your booking is confirmed."}
 
 @app.post("/api/mess/cancel-meal")
 def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -851,31 +952,6 @@ def get_my_bookings(user: dict = Depends(get_current_user), db: Session = Depend
     b_list = db.query(DBBooking).filter(or_(DBBooking.user_phone == user["phone"], DBBooking.user_phone == user["email"])).all()
     return [{"id": b.id, "target_type": b.target_type, "item_name": b.item_name, "move_in_date": b.move_in_date, "monthly_amount": b.monthly_amount, "payment_method": b.payment_method, "transaction_id": b.transaction_id, "status": b.status} for b in b_list]
 
-@app.post("/api/bookings")
-def create_booking_with_payment(req: BookingCreateWithPaymentRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    booking_id = f"b-{uuid.uuid4().hex[:8]}"
-    txn_id = f"TXN-{uuid.uuid4().hex[:8].upper()}"
-
-    db.add(DBPaymentReceipt(transaction_id=txn_id, payer_name=user["full_name"], payer_phone=user["phone"] or user["email"], amount=req.monthly_amount, payment_method=req.payment_method, description=f"Booking - {req.item_name}", date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    new_b = DBBooking(id=booking_id, user_phone=user["phone"] or user["email"], target_type=req.target_type, item_name=req.item_name, move_in_date=req.move_in_date, special_requests=req.special_requests or "", monthly_amount=req.monthly_amount, payment_method=req.payment_method, transaction_id=txn_id, status="Active")
-    db.add(new_b)
-
-    vacant_room = db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").first()
-    if vacant_room:
-        vacant_room.status, vacant_room.tenant_name, vacant_room.tenant_phone, vacant_room.tenant_address = "occupied", user["full_name"], user["phone"], user["address"]
-
-    notify_owner(db, "pg_owner", "New Room Booking Confirmed", f"{user['full_name']} booked {req.item_name}.", "booking")
-    db.commit()
-
-    background_tasks.add_task(
-        send_email_notification,
-        user["email"],
-        f"Booking Confirmation: {req.item_name}",
-        f"Hi {user['full_name']},\n\nYour room booking for {req.item_name} is confirmed!\nTransaction ID: {txn_id}\nMonthly Amount: ₹{req.monthly_amount}\nMove-in Date: {req.move_in_date}"
-    )
-
-    return {"status": "success", "message": "Payment verified and booking confirmed!"}
-
 @app.post("/api/pg/request-vacate")
 def request_student_vacate(req: RequestStudentVacate, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     booking = db.query(DBBooking).filter(DBBooking.id == req.booking_id).first()
@@ -1038,5 +1114,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
-
