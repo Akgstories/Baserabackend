@@ -7,6 +7,9 @@ import hmac
 import hashlib
 import urllib.request
 import urllib.error
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -18,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
-from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, DateTime, or_, and_, text
+from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, DateTime, or_, and_, text, inspect
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase, Mapped, mapped_column
 
 # ─── DATABASE CONFIGURATION ─────────────────────────────────────────
@@ -80,62 +83,113 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
         return base64_data
 
 
-# ─── BREVO REST HTTP API EMAIL CONFIGURATION (PORT 443 HTTPS) ────────
-BREVO_API_KEY = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", ""))
-SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "basera4you@gmail.com")
+# ─── ROBUST MULTI-PROVIDER EMAIL DISPATCHER & AUDIT ENGINE ─────────
+EMAIL_AUDIT_LOG = []  # Circular buffer storing last 25 dispatched emails
 
-def send_email_notification(recipient_email: str, subject: str, body_text: str):
+def log_email_event(recipient: str, subject: str, provider: str, status: str, error_detail: str = ""):
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "recipient": recipient,
+        "subject": subject,
+        "provider": provider,
+        "status": status,
+        "error_detail": error_detail
+    }
+    EMAIL_AUDIT_LOG.insert(0, entry)
+    if len(EMAIL_AUDIT_LOG) > 25:
+        EMAIL_AUDIT_LOG.pop()
+
+def send_email_notification(recipient_email: str, subject: str, body_text: str, html_content: Optional[str] = None):
     """
-    Dispatches transactional emails via Brevo REST HTTP API (Port 443).
-    Bypasses SMTP socket timeouts and port blocks on free cloud servers like Render.
+    Multi-provider email dispatcher with fallback:
+    Primary: Brevo REST HTTP API (Port 443)
+    Secondary: Gmail SMTP / Custom SMTP Server
+    Audit: Captures execution logs in memory circular buffer.
     """
     if not recipient_email or "@" not in recipient_email:
         return
 
-    clean_key = BREVO_API_KEY.strip()
-    if not clean_key:
-        print(f"[BREVO EMAIL NOTICE] Missing API key. Email skipped for: {recipient_email}")
-        return
+    clean_brevo_key = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", "")).strip()
+    gmail_user = os.getenv("GMAIL_USER", "").strip()
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 
-    url = "https://api.brevo.com/v3/smtp/email"
-    payload = {
-        "sender": {
-            "name": "Basera Platform",
-            "email": SENDER_EMAIL
-        },
-        "to": [
-            {
-                "email": recipient_email
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com" if gmail_user else "").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", gmail_user).strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", gmail_pass).strip()
+
+    sender_email = os.getenv("BREVO_SENDER_EMAIL", os.getenv("SENDER_EMAIL", gmail_user or "basera4you@gmail.com")).strip()
+
+    # 1. TRY BREVO REST API (HTTPS PORT 443)
+    if clean_brevo_key and clean_brevo_key.startswith("xkeysib-"):
+        try:
+            url = "https://api.brevo.com/v3/smtp/email"
+            payload = {
+                "sender": {"name": "Basera Platform", "email": sender_email},
+                "to": [{"email": recipient_email}],
+                "subject": subject,
+                "textContent": body_text
             }
-        ],
-        "subject": subject,
-        "textContent": body_text
-    }
+            if html_content:
+                payload["htmlContent"] = html_content
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "accept": "application/json",
-            "api-key": clean_key,
-            "content-type": "application/json"
-        },
-        method="POST"
-    )
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                url, data=data,
+                headers={
+                    "accept": "application/json",
+                    "api-key": clean_brevo_key,
+                    "content-type": "application/json"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=8) as response:
+                if response.status in (200, 201):
+                    print(f"[BREVO EMAIL SUCCESS] Sent to {recipient_email}")
+                    log_email_event(recipient_email, subject, "Brevo REST API", "SUCCESS")
+                    return
+                else:
+                    resp_body = response.read().decode("utf-8")
+                    print(f"[BREVO EMAIL ERROR] Status {response.status}: {resp_body}")
+                    log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", f"HTTP {response.status}: {resp_body}")
+        except urllib.error.HTTPError as e:
+            err_text = e.read().decode("utf-8")
+            print(f"[BREVO EMAIL ERROR] HTTP {e.code}: {err_text}")
+            log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", f"HTTP {e.code}: {err_text}")
+        except Exception as e:
+            print(f"[BREVO EMAIL ERROR] Exception: {e}")
+            log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", str(e))
 
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            if response.status in (200, 201):
-                print(f"[BREVO EMAIL SUCCESS] Sent to {recipient_email}")
-            else:
-                resp_body = response.read().decode("utf-8")
-                print(f"[BREVO EMAIL ERROR] Status {response.status}: {resp_body}")
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        print(f"[BREVO EMAIL ERROR] HTTP {e.code}: {error_body}")
-    except Exception as e:
-        print(f"[BREVO EMAIL ERROR] Failed to send to {recipient_email}: {e}")
+    # 2. FALLBACK TO SMTP (GMAIL / CUSTOM SMTP)
+    if smtp_server and smtp_user and smtp_password:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = f"Basera Platform <{smtp_user}>"
+            msg["To"] = recipient_email
+
+            part1 = MIMEText(body_text, "plain")
+            msg.attach(part1)
+            if html_content:
+                part2 = MIMEText(html_content, "html")
+                msg.attach(part2)
+
+            with smtplib.SMTP(smtp_server, smtp_port, timeout=8) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+                server.sendmail(smtp_user, recipient_email, msg.as_string())
+
+            print(f"[SMTP EMAIL SUCCESS] Sent to {recipient_email} via {smtp_server}")
+            log_email_event(recipient_email, subject, f"SMTP ({smtp_server})", "SUCCESS")
+            return
+        except Exception as e:
+            print(f"[SMTP EMAIL ERROR] Failed via {smtp_server}: {e}")
+            log_email_event(recipient_email, subject, f"SMTP ({smtp_server})", "FAILED", str(e))
+
+    # 3. IF UNCONFIGURED OR ALL FAILED
+    print(f"[EMAIL DISPATCH NOTICE] No active email provider available for {recipient_email}")
+    if not (clean_brevo_key or smtp_user):
+        log_email_event(recipient_email, subject, "Unconfigured", "FAILED", "Missing Brevo API key or SMTP credentials in environment variables.")
 
 
 # ─── SQLALCHEMY ORM MODELS ────────────────────────────────────────
@@ -276,13 +330,24 @@ class DBNotification(Base):
     created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
+# ─── SQLITE-SAFE DATABASE INITIALIZATION ──────────────────────────────
 def seed_database():
     try:
         Base.metadata.create_all(bind=engine)
+        inspector = inspect(engine)
 
         with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]';"))
-            conn.execute(text("ALTER TABLE pg_listings ADD COLUMN IF NOT EXISTS images TEXT DEFAULT '[]';"))
+            # Check columns dynamically to avoid SQLite OperationalError near "EXISTS"
+            if "pg_rooms" in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns("pg_rooms")]
+                if "images" not in cols:
+                    conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN images TEXT DEFAULT '[]';"))
+
+            if "pg_listings" in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns("pg_listings")]
+                if "images" not in cols:
+                    conn.execute(text("ALTER TABLE pg_listings ADD COLUMN images TEXT DEFAULT '[]';"))
+
             conn.commit()
 
         db = SessionLocal()
@@ -359,7 +424,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.2.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.3.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -397,7 +462,7 @@ def get_db():
     finally:
         db.close()
 
-# ─── ENHANCED NOTIFICATION ENGINE (DB INBOX + AUTOMATED EMAIL) ───────
+# ─── ENHANCED NOTIFICATION ENGINE ────────────────────────────────────
 def notify_owner_and_email(
     db: Session,
     background_tasks: BackgroundTasks,
@@ -406,10 +471,6 @@ def notify_owner_and_email(
     message: str,
     event_type: str = "general"
 ):
-    """
-    Saves in-app portal notification and dispatches instant emails to all relevant owners/admins.
-    """
-    # 1. Save to database notifications table
     db.add(DBNotification(
         id=f"notif-{uuid.uuid4().hex[:8]}",
         recipient_role=recipient_role,
@@ -419,7 +480,6 @@ def notify_owner_and_email(
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
     ))
 
-    # 2. Dispatch email to all users with matching role or platform admin
     target_users = db.query(DBUser).filter(
         or_(DBUser.role == recipient_role, DBUser.role == "admin")
     ).all()
@@ -434,7 +494,7 @@ def notify_owner_and_email(
             )
 
 
-# ─── SCHEMAS & AUTH ───────────────────────────────────────────────
+# ─── SCHEMAS ────────────────────────────────────────────────────────
 class RegisterRequest(BaseModel):
     full_name: str
     email: str
@@ -505,6 +565,11 @@ class ComplaintCreateRequest(BaseModel):
 class ResolveComplaintRequest(BaseModel):
     complaint_id: str
 
+class TestEmailRequest(BaseModel):
+    recipient: str
+    subject: Optional[str] = "Basera Diagnostic Test Email"
+    body: Optional[str] = "This is a live test email sent from the Basera Admin Console."
+
 def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authentication token.")
@@ -519,7 +584,7 @@ def get_current_user(authorization: Optional[str] = Header(None), db: Session = 
 
 @app.get("/")
 def root():
-    return {"status": "online", "platform": "Basera Engine", "database": "Supabase PostgreSQL Active"}
+    return {"status": "online", "platform": "Basera Engine", "database": "Active"}
 
 @app.post("/api/auth/register")
 def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -555,7 +620,6 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
 
     db.commit()
 
-    # STUDENT REGISTERED EMAIL
     background_tasks.add_task(
         send_email_notification,
         req.email,
@@ -611,7 +675,6 @@ def forgot_password(req: ForgotPasswordRequest, background_tasks: BackgroundTask
         u.password = req.new_password
     db.commit()
 
-    # PASSWORD RESET EMAIL
     background_tasks.add_task(
         send_email_notification,
         req.email,
@@ -674,7 +737,6 @@ def get_student_reminders(user: dict = Depends(get_current_user), db: Session = 
 
 @app.post("/api/student/send-reminder-emails")
 def send_reminder_emails(background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Triggers automated email reminders for expiring mess subscriptions or due rent."""
     reminders = get_student_reminders(user=user, db=db)
     mess_rem = reminders["mess_reminder"]
     pg_rem = reminders["pg_reminder"]
@@ -740,12 +802,11 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
 
     return result
 
-# ─── UNIVERSAL RAZORPAY PAYMENT & EMAIL ENDPOINTS ───────────────────
 @app.post("/api/payments/create-order")
 def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user)):
     try:
         order_data = {
-            "amount": req.amount * 100,  # Razorpay expects amount in paise
+            "amount": req.amount * 100,
             "currency": "INR",
             "receipt": f"rcpt_{uuid.uuid4().hex[:8]}",
             "notes": {
@@ -772,7 +833,6 @@ def verify_payment_and_fulfill(
     user: dict = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """Verifies Razorpay signature and emails student receipt + owner notification."""
     generated_signature = hmac.new(
         RAZORPAY_KEY_SECRET.encode(),
         f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode(),
@@ -832,7 +892,6 @@ def verify_payment_and_fulfill(
                 expiry_date=new_expiry
             ))
 
-        # NOTIFY MESS OWNER (INBOX + EMAIL)
         notify_owner_and_email(
             db=db,
             background_tasks=background_tasks,
@@ -849,7 +908,6 @@ def verify_payment_and_fulfill(
             vacant_room.tenant_phone = user["phone"]
             vacant_room.tenant_address = user["address"]
 
-        # NOTIFY PG OWNER (INBOX + EMAIL)
         notify_owner_and_email(
             db=db,
             background_tasks=background_tasks,
@@ -861,7 +919,6 @@ def verify_payment_and_fulfill(
 
     db.commit()
 
-    # EMAIL DIGITAL RECEIPT TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
@@ -910,7 +967,6 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
     )
     db.add(new_cancel)
 
-    # NOTIFY MESS OWNER (INBOX + EMAIL)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
@@ -922,7 +978,6 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
 
     db.commit()
 
-    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
@@ -961,7 +1016,6 @@ def uncancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, use
 
     db.delete(cancel_rec)
 
-    # NOTIFY MESS OWNER (INBOX + EMAIL)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
@@ -973,7 +1027,6 @@ def uncancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, use
 
     db.commit()
 
-    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
@@ -1108,7 +1161,6 @@ def request_student_vacate(req: RequestStudentVacate, background_tasks: Backgrou
     vreq_id = f"vreq-{uuid.uuid4().hex[:6]}"
     db.add(DBVacateRequest(id=vreq_id, room_number=room_num, student_name=user["full_name"], student_phone=user["phone"] or user["email"], booking_id=booking.id, status="Pending"))
 
-    # NOTIFY PG OWNER (INBOX + EMAIL)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
@@ -1120,7 +1172,6 @@ def request_student_vacate(req: RequestStudentVacate, background_tasks: Backgrou
 
     db.commit()
 
-    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
@@ -1148,7 +1199,6 @@ def approve_vacate_request(req: ApproveVacateRequest, background_tasks: Backgrou
         if r: r.status, r.tenant_name, r.tenant_phone, r.tenant_address = "vacant", "-", "-", "-"
         db.commit()
 
-        # EMAIL STUDENT VACATE APPROVAL
         student_user = db.query(DBUser).filter(DBUser.full_name == v_req.student_name).first()
         if student_user:
             background_tasks.add_task(
@@ -1222,7 +1272,6 @@ def raise_complaint(req: ComplaintCreateRequest, background_tasks: BackgroundTas
 
     target_role = "pg_owner" if req.category == "PG Maintenance" else "mess_partner"
 
-    # NOTIFY OWNER (INBOX + EMAIL)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
@@ -1234,7 +1283,6 @@ def raise_complaint(req: ComplaintCreateRequest, background_tasks: BackgroundTas
 
     db.commit()
 
-    # CONFIRMATION EMAIL TO STUDENT
     background_tasks.add_task(
         send_email_notification,
         user["email"],
@@ -1258,7 +1306,6 @@ def resolve_complaint(req: ResolveComplaintRequest, background_tasks: Background
     comp.status = "Resolved"
     db.commit()
 
-    # EMAIL STUDENT RESOLUTION NOTICE
     student_user = db.query(DBUser).filter(or_(DBUser.phone == comp.user_phone, DBUser.email == comp.user_phone)).first()
     if student_user:
         background_tasks.add_task(
@@ -1278,6 +1325,49 @@ def get_notifications(user: dict = Depends(get_current_user), db: Session = Depe
 
     return [{"id": n.id, "title": n.title, "message": n.message, "event_type": n.event_type, "created_at": n.created_at} for n in notifs]
 
+# ─── ADMIN EMAIL DIAGNOSTIC & AUDIT ENDPOINTS ───────────────────────
+@app.get("/api/admin/email-status")
+def get_email_status(user: dict = Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required.")
+
+    brevo_key = os.getenv("BREVO_API_KEY", os.getenv("BREVO_SMTP_KEY", "")).strip()
+    gmail_user = os.getenv("GMAIL_USER", "").strip()
+    smtp_server = os.getenv("SMTP_SERVER", "").strip()
+
+    brevo_active = bool(brevo_key and brevo_key.startswith("xkeysib-"))
+    smtp_active = bool((gmail_user and os.getenv("GMAIL_APP_PASSWORD")) or (smtp_server and os.getenv("SMTP_USER")))
+
+    return {
+        "status": "success",
+        "providers": {
+            "brevo_api": {
+                "configured": brevo_active,
+                "sender": os.getenv("BREVO_SENDER_EMAIL", "basera4you@gmail.com")
+            },
+            "smtp": {
+                "configured": smtp_active,
+                "server": smtp_server or ("smtp.gmail.com" if gmail_user else "Not set"),
+                "user": gmail_user or os.getenv("SMTP_USER", "Not set")
+            }
+        },
+        "recent_logs": EMAIL_AUDIT_LOG
+    }
+
+@app.post("/api/admin/test-email")
+def send_test_email(req: TestEmailRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required.")
+
+    background_tasks.add_task(
+        send_email_notification,
+        req.recipient,
+        req.subject or "Basera Live Diagnostic Test Email",
+        req.body or "This is an automated test email dispatched from Basera Admin Console."
+    )
+
+    return {"status": "success", "message": f"Test email task queued for {req.recipient}. Refresh Audit Log to inspect dispatch status."}
+
 @app.get("/api/admin/metrics")
 def get_admin_metrics(db: Session = Depends(get_db)):
     return {
@@ -1292,3 +1382,5 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
+ 
