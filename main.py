@@ -50,9 +50,6 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 # ─── AUTOMATIC IMAGE CONVERSION & COMPRESSION ENGINE ─────────────────
 def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), quality=75) -> str:
-    """
-    Resizes and converts base64 image data to WebP format to reduce phone photos down to ~40-80KB.
-    """
     if not base64_data or not base64_data.startswith("data:image"):
         return base64_data
 
@@ -84,7 +81,7 @@ def compress_and_convert_to_webp(base64_data: str, max_size=(1024, 1024), qualit
 
 
 # ─── ROBUST MULTI-PROVIDER EMAIL DISPATCHER & AUDIT ENGINE ─────────
-EMAIL_AUDIT_LOG = []  # Circular buffer storing last 25 dispatched emails
+EMAIL_AUDIT_LOG = []
 
 def log_email_event(recipient: str, subject: str, provider: str, status: str, error_detail: str = ""):
     entry = {
@@ -100,12 +97,6 @@ def log_email_event(recipient: str, subject: str, provider: str, status: str, er
         EMAIL_AUDIT_LOG.pop()
 
 def send_email_notification(recipient_email: str, subject: str, body_text: str, html_content: Optional[str] = None):
-    """
-    Multi-provider email dispatcher with automatic fallback:
-    1. Brevo REST API (for xkeysib- keys) -> Port 443 HTTPS (Never blocked by cloud hosts)
-    2. Brevo SMTP Relay (for xsmtpsib- keys) -> Ports 587 / 465
-    3. Gmail SMTP / Custom SMTP Fallback
-    """
     if not recipient_email or "@" not in recipient_email:
         return
 
@@ -121,7 +112,6 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
 
     dispatch_attempted = False
 
-    # 1. BREVO REST API (Port 443 HTTPS - Recommended for Render)
     if clean_brevo_key and clean_brevo_key.startswith("xkeysib-"):
         dispatch_attempted = True
         try:
@@ -159,7 +149,6 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
         except Exception as e:
             log_email_event(recipient_email, subject, "Brevo REST API", "FAILED", str(e))
 
-    # 2. BREVO SMTP RELAY (for keys starting with xsmtpsib-)
     if clean_brevo_key and clean_brevo_key.startswith("xsmtpsib-"):
         dispatch_attempted = True
         for port, use_ssl in [(465, True), (587, False)]:
@@ -188,9 +177,8 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
             except Exception as e:
                 print(f"[BREVO SMTP NOTICE] Port {port} failed: {e}")
         
-        log_email_event(recipient_email, subject, "Brevo SMTP Relay", "FAILED", "Render blocked outbound SMTP ports 587/465. Switch to a REST API key (xkeysib-).")
+        log_email_event(recipient_email, subject, "Brevo SMTP Relay", "FAILED", "Render blocked outbound SMTP ports 587/465. Switch to REST API key (xkeysib-).")
 
-    # 3. GMAIL / CUSTOM SMTP FALLBACK
     if smtp_server and smtp_user and smtp_password:
         dispatch_attempted = True
         try:
@@ -221,7 +209,7 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
 
     if not dispatch_attempted:
         print(f"[EMAIL DISPATCH NOTICE] No active email provider configured for {recipient_email}")
-        log_email_event(recipient_email, subject, "Unconfigured", "FAILED", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
+        log_email_event(recipient_email, subject, "Unconfigured", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
 
 
 # ─── SQLALCHEMY ORM MODELS ────────────────────────────────────────
@@ -299,7 +287,7 @@ class DBMessStudent(Base):
     diet: Mapped[str] = mapped_column(String, nullable=False)
     base_price: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    expiry_date: Mapped[str] = mapped_column(String, default=lambda: (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"))
+    expiry_date: Mapped[str] = mapped_column(String, default=lambda: (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"))
 
 class DBMealCancellation(Base):
     __tablename__ = "meal_cancellations"
@@ -455,7 +443,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.4.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.5.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -572,6 +560,7 @@ class VerifyPaymentRequest(BaseModel):
     monthly_amount: int
     move_in_date: str
     special_requests: Optional[str] = ""
+    duration_days: Optional[int] = 30
 
 class RequestStudentVacate(BaseModel):
     booking_id: str
@@ -903,7 +892,9 @@ def verify_payment_and_fulfill(
 
     if is_mess_item:
         ms = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
-        new_expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        duration = req.duration_days if req.duration_days and req.duration_days > 0 else 30
+        new_expiry = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d")
+
         if ms:
             ms.is_active = True
             ms.base_price = req.monthly_amount
@@ -928,7 +919,7 @@ def verify_payment_and_fulfill(
             background_tasks=background_tasks,
             recipient_role="mess_partner",
             title="New Mess Subscription Confirmed",
-            message=f"Student '{user['full_name']}' ({user['phone']}) subscribed to '{req.item_name}' (Amount Paid: ₹{req.monthly_amount}). Delivery Address: {user['address']}",
+            message=f"Student '{user['full_name']}' ({user['phone']}) subscribed to '{req.item_name}' (Amount Paid: ₹{req.monthly_amount}, Duration: {duration} days). Delivery Address: {user['address']}",
             event_type="mess_payment"
         )
     else:
@@ -1415,3 +1406,4 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
