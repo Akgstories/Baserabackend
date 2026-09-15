@@ -255,6 +255,13 @@ class DBMessListing(Base):
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=GEC+Bokaro+Main+Gate")
     description: Mapped[str] = mapped_column(Text, nullable=False)
 
+class DBMessPricing(Base):
+    __tablename__ = "mess_pricing"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    location_name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    three_time_rate: Mapped[int] = mapped_column(Integer, nullable=False)
+    two_time_rate: Mapped[int] = mapped_column(Integer, nullable=False)
+
 class DBPGRoom(Base):
     __tablename__ = "pg_rooms"
     room_number: Mapped[str] = mapped_column(String, primary_key=True, index=True)
@@ -350,7 +357,7 @@ class DBNotification(Base):
     created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
-# ─── SQLITE-SAFE DATABASE INITIALIZATION ──────────────────────────────
+# ─── DATABASE INITIALIZATION ──────────────────────────────────────────
 def seed_database():
     try:
         Base.metadata.create_all(bind=engine)
@@ -377,6 +384,13 @@ def seed_database():
                 password="admin@2026", phone="9155118661", address="Admin Office, GEC Bokaro",
                 google_map_url="https://maps.google.com/?q=GEC+Bokaro", role="admin", token="tok-admin123"
             ))
+
+        if not db.query(DBMessPricing).first():
+            db.add_all([
+                DBMessPricing(location_name="GEC Main Gate", three_time_rate=100, two_time_rate=80),
+                DBMessPricing(location_name="Chandankiyari", three_time_rate=90, two_time_rate=70),
+                DBMessPricing(location_name="Ghoragara", three_time_rate=110, two_time_rate=85)
+            ])
 
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         for d in days:
@@ -443,7 +457,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.7.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.8.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -561,7 +575,7 @@ class VerifyPaymentRequest(BaseModel):
     move_in_date: str
     special_requests: Optional[str] = ""
     duration_days: Optional[int] = 30
-    diet_preference: Optional[str] = "Veg"  # Captured diet selection (Veg / Non-Veg)
+    diet_preference: Optional[str] = "Veg"
 
 class RequestStudentVacate(BaseModel):
     booking_id: str
@@ -606,6 +620,22 @@ def get_current_user(authorization: Optional[str] = Header(None), db: Session = 
 @app.get("/")
 def root():
     return {"status": "online", "platform": "Basera Engine", "database": "Active"}
+
+@app.get("/api/mess-pricing")
+def get_mess_pricing(db: Session = Depends(get_db)):
+    pricing = db.query(DBMessPricing).all()
+    if not pricing:
+        return {
+            "GEC Main Gate": {"3-Time": 100, "2-Time": 80},
+            "Chandankiyari": {"3-Time": 90, "2-Time": 70},
+            "Ghoragara": {"3-Time": 110, "2-Time": 85}
+        }
+    return {
+        p.location_name: {
+            "3-Time": p.three_time_rate,
+            "2-Time": p.two_time_rate
+        } for p in pricing
+    }
 
 @app.post("/api/auth/register")
 def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -1409,4 +1439,5 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
 
