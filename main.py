@@ -410,14 +410,14 @@ def seed_database():
             db.add_all([
                 DBMessListing(
                     id="mess-1", name="Annapurna Homely Mess", provider_name="Ramesh Sharma",
-                    monthly_price=3000, diet_type="Veg & Non-Veg", meals_per_day="3-Time (Breakfast, Lunch, Dinner)",
+                    monthly_price=3000, diet_type="Veg & Non-Veg", meals_per_day="Flexible Plan Options",
                     rating="4.9 (42 reviews)", address="📍 Near GEC Bokaro Main Gate",
                     google_map_url="https://maps.google.com/?q=GEC+Bokaro+Main+Gate",
                     description="Freshly prepared hygienic meals tailored for engineering students."
                 ),
                 DBMessListing(
                     id="mess-2", name="Shuddha Shakahari Mess", provider_name="Geeta Devi",
-                    monthly_price=2600, diet_type="Pure Veg", meals_per_day="3-Time (Breakfast, Lunch, Dinner)",
+                    monthly_price=2600, diet_type="Pure Veg", meals_per_day="Flexible Plan Options",
                     rating="4.8 (31 reviews)", address="📍 Vill-Ghoragara, Chandankiyari",
                     google_map_url="https://maps.google.com/?q=Chandankiyari+Bokaro",
                     description="100% Pure Vegetarian North & South Indian meals cooked with pure desi ghee."
@@ -432,7 +432,7 @@ def seed_database():
 
         if not db.query(DBMessStudent).first():
             db.add_all([
-                DBMessStudent(id="ms-101", name="Aditya Kumar", phone="9155118661", address="GEC Bokaro Hostel, Room 101", google_map_url="https://maps.google.com/?q=GEC+Bokaro+Hostel", plan="3-Time Daily Mess Plan", diet="Non-Veg", base_price=3000, is_active=True),
+                DBMessStudent(id="ms-101", name="Aditya Kumar", phone="9155118661", address="GEC Bokaro Hostel, Room 101", google_map_url="https://maps.google.com/?q=GEC+Bokaro+Hostel", plan="3-Time Standard Daily Plan", diet="Non-Veg", base_price=3000, is_active=True),
                 DBMessStudent(id="ms-102", name="Tushar Das", phone="9876542170", address="Power Grid Boys PG, Room 204", google_map_url="https://maps.google.com/?q=23.5750,86.3500", plan="2-Time Standard Plan", diet="Veg", base_price=2500, is_active=True)
             ])
 
@@ -443,7 +443,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.5.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.6.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -1406,4 +1406,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
