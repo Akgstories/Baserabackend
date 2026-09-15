@@ -443,7 +443,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.6.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.7.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -561,6 +561,7 @@ class VerifyPaymentRequest(BaseModel):
     move_in_date: str
     special_requests: Optional[str] = ""
     duration_days: Optional[int] = 30
+    diet_preference: Optional[str] = "Veg"  # Captured diet selection (Veg / Non-Veg)
 
 class RequestStudentVacate(BaseModel):
     booking_id: str
@@ -635,7 +636,7 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
         db.add(DBMessStudent(
             id=f"ms-{uuid.uuid4().hex[:6]}", name=new_user.full_name,
             phone=clean_phone, address=new_user.address, google_map_url=map_url,
-            plan="3-Time Standard Daily Plan", diet="Non-Veg", base_price=3000, is_active=True
+            plan="3-Time Standard Daily Plan", diet="Veg", base_price=3000, is_active=True
         ))
 
     db.commit()
@@ -894,12 +895,14 @@ def verify_payment_and_fulfill(
         ms = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
         duration = req.duration_days if req.duration_days and req.duration_days > 0 else 30
         new_expiry = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d")
+        diet_choice = req.diet_preference or "Veg"
 
         if ms:
             ms.is_active = True
             ms.base_price = req.monthly_amount
             ms.expiry_date = new_expiry
             ms.plan = req.item_name
+            ms.diet = diet_choice
         else:
             db.add(DBMessStudent(
                 id=f"ms-{uuid.uuid4().hex[:6]}",
@@ -908,7 +911,7 @@ def verify_payment_and_fulfill(
                 address=user["address"] or "Hostel",
                 google_map_url=user["google_map_url"] or "",
                 plan=req.item_name,
-                diet="Veg/Non-Veg",
+                diet=diet_choice,
                 base_price=req.monthly_amount,
                 is_active=True,
                 expiry_date=new_expiry
@@ -919,7 +922,7 @@ def verify_payment_and_fulfill(
             background_tasks=background_tasks,
             recipient_role="mess_partner",
             title="New Mess Subscription Confirmed",
-            message=f"Student '{user['full_name']}' ({user['phone']}) subscribed to '{req.item_name}' (Amount Paid: ₹{req.monthly_amount}, Duration: {duration} days). Delivery Address: {user['address']}",
+            message=f"Student '{user['full_name']}' ({user['phone']}) subscribed to '{req.item_name}' (Diet Preference: {diet_choice}, Amount Paid: ₹{req.monthly_amount}, Duration: {duration} days). Delivery Address: {user['address']}",
             event_type="mess_payment"
         )
     else:
@@ -1406,3 +1409,4 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
