@@ -568,6 +568,16 @@ class WeeklyMenuUpdateRequest(BaseModel):
     lunch: str
     dinner: str
 
+class CreateMessListingRequest(BaseModel):
+    name: str
+    provider_name: str
+    monthly_price: int
+    diet_type: str
+    meals_per_day: str
+    address: str
+    google_map_url: str
+    description: str
+
 class CreateOrderRequest(BaseModel):
     amount: int
     item_name: str
@@ -757,6 +767,31 @@ def get_mess_listings(db: Session = Depends(get_db)):
         }
         for m in listings
     ]
+@app.post("/api/mess/add-listing")
+def create_mess_listing(
+    req: CreateMessListingRequest, 
+    user: dict = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    if user["role"] not in ["mess_partner", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized action.")
+        
+    mess_id = f"mess-{uuid.uuid4().hex[:6]}"
+    new_mess = DBMessListing(
+        id=mess_id,
+        name=req.name,
+        provider_name=req.provider_name,
+        monthly_price=req.monthly_price,
+        diet_type=req.diet_type,
+        meals_per_day=req.meals_per_day,
+        rating="5.0 (New)",
+        address=req.address,
+        google_map_url=req.google_map_url,
+        description=req.description
+    )
+    db.add(new_mess)
+    db.commit()
+    return {"status": "success", "message": f"Mess '{req.name}' listed successfully!", "mess_id": mess_id}
 
 @app.get("/api/student/reminders")
 def get_student_reminders(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
