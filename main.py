@@ -212,14 +212,6 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
         log_email_event(recipient_email, subject, "Unconfigured", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
 
 
-from pydantic import BaseModel
-
-# --- Models ---
-class UpdateMessPriceRequest(BaseModel):
-    mess_id: str
-    monthly_price: int
-
-
 # ─── SQLALCHEMY ORM MODELS ────────────────────────────────────────
 class DBUser(Base):
     __tablename__ = "users"
@@ -471,7 +463,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.9.0")
+app = FastAPI(title="Basera Multi-Portal API", version="14.0.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -566,6 +558,10 @@ class ProfileUpdateRequest(BaseModel):
     address: str
     google_map_url: Optional[str] = ""
 
+class UpdateMessPriceRequest(BaseModel):
+    mess_id: str
+    monthly_price: int
+
 class MealCancelRequest(BaseModel):
     meal_type: str
     date: Optional[str] = None
@@ -648,18 +644,14 @@ def root():
 @app.get("/api/mess-pricing")
 def get_mess_pricing(db: Session = Depends(get_db)):
     pricing = db.query(DBMessPricing).all()
-    if not pricing:
-        return {
-            "GEC Main Gate": {"3-Time": 100, "2-Time": 80},
-            "Chandankiyari": {"3-Time": 90, "2-Time": 70},
-            "Ghoragara": {"3-Time": 110, "2-Time": 85}
-        }
-    return {
-        p.location_name: {
-            "3-Time": p.three_time_rate,
-            "2-Time": p.two_time_rate
+    return [
+        {
+            "id": p.id,
+            "location_name": p.location_name,
+            "three_time_rate": p.three_time_rate,
+            "two_time_rate": p.two_time_rate
         } for p in pricing
-    }
+    ]
 
 @app.post("/api/auth/register")
 def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -775,6 +767,7 @@ def get_mess_listings(db: Session = Depends(get_db)):
         }
         for m in listings
     ]
+
 @app.post("/api/mess/add-listing")
 def create_mess_listing(
     req: CreateMessListingRequest, 
@@ -801,7 +794,6 @@ def create_mess_listing(
     db.commit()
     return {"status": "success", "message": f"Mess '{req.name}' listed successfully!", "mess_id": mess_id}
 
-# --- Mess Routes ---
 @app.post("/api/mess/update-price")
 def update_mess_price(req: UpdateMessPriceRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     if user["role"] not in ["mess_partner", "admin"]:
@@ -1551,3 +1543,4 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
