@@ -290,6 +290,7 @@ class DBMessStudent(Base):
     phone: Mapped[str] = mapped_column(String, nullable=False)
     address: Mapped[str] = mapped_column(String, nullable=False)
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=GEC+Bokaro+Hostel")
+    mess_name: Mapped[str] = mapped_column(String, default="Annapurna Homely Mess")
     plan: Mapped[str] = mapped_column(String, nullable=False)
     diet: Mapped[str] = mapped_column(String, nullable=False)
     base_price: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -374,6 +375,11 @@ def seed_database():
                 if "images" not in cols:
                     conn.execute(text("ALTER TABLE pg_listings ADD COLUMN images TEXT DEFAULT '[]';"))
 
+            if "mess_students" in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns("mess_students")]
+                if "mess_name" not in cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_name TEXT DEFAULT 'Annapurna Homely Mess';"))
+
             conn.commit()
 
         db = SessionLocal()
@@ -446,8 +452,8 @@ def seed_database():
 
         if not db.query(DBMessStudent).first():
             db.add_all([
-                DBMessStudent(id="ms-101", name="Aditya Kumar", phone="9155118661", address="GEC Bokaro Hostel, Room 101", google_map_url="https://maps.google.com/?q=GEC+Bokaro+Hostel", plan="3-Time Standard Daily Plan", diet="Non-Veg", base_price=3000, is_active=True),
-                DBMessStudent(id="ms-102", name="Tushar Das", phone="9876542170", address="Power Grid Boys PG, Room 204", google_map_url="https://maps.google.com/?q=23.5750,86.3500", plan="2-Time Standard Plan", diet="Veg", base_price=2500, is_active=True)
+                DBMessStudent(id="ms-101", name="Aditya Kumar", phone="9155118661", address="GEC Bokaro Hostel, Room 101", google_map_url="https://maps.google.com/?q=GEC+Bokaro+Hostel", mess_name="Annapurna Homely Mess", plan="3-Time Standard Daily Plan", diet="Non-Veg", base_price=3000, is_active=True),
+                DBMessStudent(id="ms-102", name="Tushar Das", phone="9876542170", address="Power Grid Boys PG, Room 204", google_map_url="https://maps.google.com/?q=23.5750,86.3500", mess_name="Shuddha Shakahari Mess", plan="2-Time Standard Plan", diet="Veg", base_price=2500, is_active=True)
             ])
 
         db.commit()
@@ -457,7 +463,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="13.8.0")
+app = FastAPI(title="Basera Multi-Portal API", version="13.9.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -666,7 +672,7 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
         db.add(DBMessStudent(
             id=f"ms-{uuid.uuid4().hex[:6]}", name=new_user.full_name,
             phone=clean_phone, address=new_user.address, google_map_url=map_url,
-            plan="3-Time Standard Daily Plan", diet="Veg", base_price=3000, is_active=True
+            mess_name="Annapurna Homely Mess", plan="3-Time Standard Daily Plan", diet="Veg", base_price=3000, is_active=True
         ))
 
     db.commit()
@@ -926,6 +932,8 @@ def verify_payment_and_fulfill(
         duration = req.duration_days if req.duration_days and req.duration_days > 0 else 30
         new_expiry = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d")
         diet_choice = req.diet_preference or "Veg"
+        
+        extracted_mess_name = req.item_name.split("(")[0].strip() if "(" in req.item_name else req.item_name
 
         if ms:
             ms.is_active = True
@@ -933,6 +941,7 @@ def verify_payment_and_fulfill(
             ms.expiry_date = new_expiry
             ms.plan = req.item_name
             ms.diet = diet_choice
+            ms.mess_name = extracted_mess_name
         else:
             db.add(DBMessStudent(
                 id=f"ms-{uuid.uuid4().hex[:6]}",
@@ -940,6 +949,7 @@ def verify_payment_and_fulfill(
                 phone=user["phone"] or "9155118661",
                 address=user["address"] or "Hostel",
                 google_map_url=user["google_map_url"] or "",
+                mess_name=extracted_mess_name,
                 plan=req.item_name,
                 diet=diet_choice,
                 base_price=req.monthly_amount,
@@ -1092,9 +1102,33 @@ def uncancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, use
     return {"status": "success", "message": f"Successfully restored {req.meal_type} for {target_date}!"}
 
 @app.get("/api/mess/daily-stats")
-def get_mess_daily_stats(date: str = Query(default=datetime.now().strftime("%Y-%m-%d")), db: Session = Depends(get_db)):
-    cancels = db.query(DBMealCancellation).filter(DBMealCancellation.date == date).all()
-    active_students = db.query(DBMessStudent).filter(DBMessStudent.is_active == True).all()
+def get_mess_daily_stats(
+    date: str = Query(default=datetime.now().strftime("%Y-%m-%d")),
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+):
+    query_students = db.query(DBMessStudent).filter(DBMessStudent.is_active == True)
+
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+        user = db.query(DBUser).filter(DBUser.token == token).first()
+        if user and user.role == "mess_partner":
+            mess = db.query(DBMessListing).filter(DBMessListing.provider_name.ilike(f"%{user.full_name}%")).first()
+            target_mess_name = mess.name if mess else user.full_name
+            query_students = query_students.filter(
+                or_(
+                    DBMessStudent.mess_name.ilike(f"%{target_mess_name}%"),
+                    DBMessStudent.plan.ilike(f"%{target_mess_name}%")
+                )
+            )
+
+    active_students = query_students.all()
+    active_student_names = [s.name for s in active_students]
+
+    cancels = db.query(DBMealCancellation).filter(
+        DBMealCancellation.date == date,
+        DBMealCancellation.student_name.in_(active_student_names)
+    ).all()
 
     return {
         "date": date,
@@ -1114,8 +1148,27 @@ def get_mess_daily_stats(date: str = Query(default=datetime.now().strftime("%Y-%
     }
 
 @app.get("/api/mess/owner-monthly-billing")
-def get_owner_monthly_billing(month: str = Query(default="2026-09"), db: Session = Depends(get_db)):
-    subscribers = db.query(DBMessStudent).all()
+def get_owner_monthly_billing(
+    month: str = Query(default="2026-09"),
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db)
+):
+    query_subscribers = db.query(DBMessStudent)
+
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ")[1]
+        user = db.query(DBUser).filter(DBUser.token == token).first()
+        if user and user.role == "mess_partner":
+            mess = db.query(DBMessListing).filter(DBMessListing.provider_name.ilike(f"%{user.full_name}%")).first()
+            target_mess_name = mess.name if mess else user.full_name
+            query_subscribers = query_subscribers.filter(
+                or_(
+                    DBMessStudent.mess_name.ilike(f"%{target_mess_name}%"),
+                    DBMessStudent.plan.ilike(f"%{target_mess_name}%")
+                )
+            )
+
+    subscribers = query_subscribers.all()
     billing_data = []
 
     for s in subscribers:
@@ -1419,7 +1472,7 @@ def send_test_email(req: TestEmailRequest, background_tasks: BackgroundTasks, us
     background_tasks.add_task(
         send_email_notification,
         req.recipient,
-        req.subject or "Basera Live Diagnostic Test Email",
+        req.subject or "Basera Diagnostic Test Email",
         req.body or "This is an automated test email dispatched from Basera Admin Console."
     )
 
@@ -1439,5 +1492,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
-
