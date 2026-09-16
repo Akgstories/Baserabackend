@@ -212,6 +212,14 @@ def send_email_notification(recipient_email: str, subject: str, body_text: str, 
         log_email_event(recipient_email, subject, "Unconfigured", "Missing Brevo API/SMTP key or generic SMTP credentials in environment variables.")
 
 
+from pydantic import BaseModel
+
+# --- Models ---
+class UpdateMessPriceRequest(BaseModel):
+    mess_id: str
+    monthly_price: int
+
+
 # ─── SQLALCHEMY ORM MODELS ────────────────────────────────────────
 class DBUser(Base):
     __tablename__ = "users"
@@ -792,6 +800,22 @@ def create_mess_listing(
     db.add(new_mess)
     db.commit()
     return {"status": "success", "message": f"Mess '{req.name}' listed successfully!", "mess_id": mess_id}
+
+# --- Mess Routes ---
+@app.post("/api/mess/update-price")
+def update_mess_price(req: UpdateMessPriceRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] not in ["mess_partner", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized action.")
+    
+    mess = db.query(DBMessListing).filter(DBMessListing.id == req.mess_id).first()
+    if not mess:
+        mess = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{req.mess_id}%")).first()
+    if not mess:
+        raise HTTPException(status_code=404, detail="Mess listing not found.")
+    
+    mess.monthly_price = req.monthly_price
+    db.commit()
+    return {"status": "success", "message": f"Updated monthly price for '{mess.name}' to ₹{req.monthly_price}!"}
 
 @app.get("/api/student/reminders")
 def get_student_reminders(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
