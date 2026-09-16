@@ -761,17 +761,39 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
 
 @app.post("/api/auth/login")
 def login_user(req: LoginRequest, db: Session = Depends(get_db)):
-    query = db.query(DBUser).filter(DBUser.email == req.email, DBUser.password == req.password)
+    # Build query filtering strictly by email, password, and target_role
+    query = db.query(DBUser).filter(
+        DBUser.email == req.email, 
+        DBUser.password == req.password
+    )
+    
     if req.target_role:
         query = query.filter(DBUser.role == req.target_role)
 
-    user = query.first() or db.query(DBUser).filter(DBUser.email == req.email, DBUser.password == req.password).first()
+    # Strictly check for a match without fallback
+    user = query.first()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email, password, or role combination.")
+        role_label = req.target_role.replace('_', ' ').title() if req.target_role else "selected"
+        raise HTTPException(
+            status_code=401, 
+            detail=f"No account registered under the '{role_label}' role with these credentials. Please select the correct role or create an account."
+        )
 
     user.token = f"tok-{uuid.uuid4().hex}"
     db.commit()
-    return {"status": "success", "token": user.token, "user": {"id": user.id, "full_name": user.full_name, "email": user.email, "phone": user.phone, "address": user.address, "google_map_url": user.google_map_url, "role": user.role}}
+    return {
+        "status": "success", 
+        "token": user.token, 
+        "user": {
+            "id": user.id, 
+            "full_name": user.full_name, 
+            "email": user.email, 
+            "phone": user.phone, 
+            "address": user.address, 
+            "google_map_url": user.google_map_url, 
+            "role": user.role
+        }
+    }
 
 @app.post("/api/auth/profile/update")
 def update_profile(req: ProfileUpdateRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1613,3 +1635,5 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
+
+
