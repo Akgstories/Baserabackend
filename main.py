@@ -258,7 +258,8 @@ class DBMessListing(Base):
 class DBMessPricing(Base):
     __tablename__ = "mess_pricing"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
-    location_name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    mess_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    location_name: Mapped[str] = mapped_column(String, nullable=False)
     three_time_rate: Mapped[int] = mapped_column(Integer, nullable=False)
     two_time_rate: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -365,6 +366,11 @@ def seed_database():
         inspector = inspect(engine)
 
         with engine.connect() as conn:
+            if "mess_pricing" in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns("mess_pricing")]
+                if "mess_id" not in cols:
+                    conn.execute(text("ALTER TABLE mess_pricing ADD COLUMN mess_id VARCHAR DEFAULT 'mess-1';"))
+
             if "pg_rooms" in inspector.get_table_names():
                 cols = [c["name"] for c in inspector.get_columns("pg_rooms")]
                 if "images" not in cols:
@@ -391,11 +397,47 @@ def seed_database():
                 google_map_url="https://maps.google.com/?q=GEC+Bokaro", role="admin", token="tok-admin123"
             ))
 
+        if not db.query(DBMessListing).first():
+            db.add_all([
+                DBMessListing(
+                    id="mess-1", name="Annapurna Homely Mess", provider_name="Ramesh Sharma",
+                    monthly_price=3000, diet_type="Veg & Non-Veg", meals_per_day="Flexible Plan Options",
+                    rating="4.9 (42 reviews)", address="📍 Near GEC Bokaro Main Gate",
+                    google_map_url="https://maps.google.com/?q=GEC+Bokaro+Main+Gate",
+                    description="Freshly prepared hygienic meals tailored for engineering students."
+                ),
+                DBMessListing(
+                    id="mess-2", name="Shuddha Shakahari Mess", provider_name="Geeta Devi",
+                    monthly_price=2600, diet_type="Pure Veg", meals_per_day="Flexible Plan Options",
+                    rating="4.8 (31 reviews)", address="📍 Vill-Ghoragara, Chandankiyari",
+                    google_map_url="https://maps.google.com/?q=Chandankiyari+Bokaro",
+                    description="100% Pure Vegetarian North & South Indian meals cooked with pure desi ghee."
+                ),
+                DBMessListing(
+                    id="mess-3", name="Archana mess", provider_name="Archana Devi",
+                    monthly_price=3600, diet_type="Veg & Non-Veg", meals_per_day="Flexible Plan Options",
+                    rating="5.0 (New)", address="📍 Near GEC Bokaro",
+                    google_map_url="https://maps.google.com/?q=GEC+Bokaro",
+                    description="Freshly prepared hygienic meals."
+                )
+            ])
+
         if not db.query(DBMessPricing).first():
             db.add_all([
-                DBMessPricing(location_name="GEC Main Gate", three_time_rate=100, two_time_rate=80),
-                DBMessPricing(location_name="Chandankiyari", three_time_rate=90, two_time_rate=70),
-                DBMessPricing(location_name="Ghoragara", three_time_rate=110, two_time_rate=85)
+                # Annapurna Homely Mess (mess-1)
+                DBMessPricing(mess_id="mess-1", location_name="GEC Main Gate", three_time_rate=100, two_time_rate=80),
+                DBMessPricing(mess_id="mess-1", location_name="Chandankiyari", three_time_rate=90, two_time_rate=70),
+                DBMessPricing(mess_id="mess-1", location_name="Ghoragara", three_time_rate=110, two_time_rate=85),
+
+                # Shuddha Shakahari Mess (mess-2)
+                DBMessPricing(mess_id="mess-2", location_name="GEC Main Gate", three_time_rate=90, two_time_rate=70),
+                DBMessPricing(mess_id="mess-2", location_name="Chandankiyari", three_time_rate=80, two_time_rate=65),
+                DBMessPricing(mess_id="mess-2", location_name="Ghoragara", three_time_rate=95, two_time_rate=75),
+
+                # Archana mess (mess-3)
+                DBMessPricing(mess_id="mess-3", location_name="GEC Main Gate", three_time_rate=120, two_time_rate=95),
+                DBMessPricing(mess_id="mess-3", location_name="Chandankiyari", three_time_rate=110, two_time_rate=85),
+                DBMessPricing(mess_id="mess-3", location_name="Ghoragara", three_time_rate=125, two_time_rate=100)
             ])
 
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -426,24 +468,6 @@ def seed_database():
                 )
             ])
 
-        if not db.query(DBMessListing).first():
-            db.add_all([
-                DBMessListing(
-                    id="mess-1", name="Annapurna Homely Mess", provider_name="Ramesh Sharma",
-                    monthly_price=3000, diet_type="Veg & Non-Veg", meals_per_day="Flexible Plan Options",
-                    rating="4.9 (42 reviews)", address="📍 Near GEC Bokaro Main Gate",
-                    google_map_url="https://maps.google.com/?q=GEC+Bokaro+Main+Gate",
-                    description="Freshly prepared hygienic meals tailored for engineering students."
-                ),
-                DBMessListing(
-                    id="mess-2", name="Shuddha Shakahari Mess", provider_name="Geeta Devi",
-                    monthly_price=2600, diet_type="Pure Veg", meals_per_day="Flexible Plan Options",
-                    rating="4.8 (31 reviews)", address="📍 Vill-Ghoragara, Chandankiyari",
-                    google_map_url="https://maps.google.com/?q=Chandankiyari+Bokaro",
-                    description="100% Pure Vegetarian North & South Indian meals cooked with pure desi ghee."
-                )
-            ])
-
         if not db.query(DBPGRoom).first():
             db.add_all([
                 DBPGRoom(room_number="101", room_type="Single AC", tenant_name="Rahul Kumar", tenant_phone="9876543210", tenant_address="GEC Bokaro Hostel Block A", monthly_rent=8000, status="occupied", images="[]"),
@@ -463,7 +487,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="14.0.0")
+app = FastAPI(title="Basera Multi-Portal API", version="15.0.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -562,6 +586,12 @@ class UpdateMessPriceRequest(BaseModel):
     mess_id: str
     monthly_price: int
 
+class UpdateMessLocationPricingRequest(BaseModel):
+    mess_id: str
+    location_name: str
+    three_time_rate: int
+    two_time_rate: int
+
 class MealCancelRequest(BaseModel):
     meal_type: str
     date: Optional[str] = None
@@ -642,16 +672,49 @@ def root():
     return {"status": "online", "platform": "Basera Engine", "database": "Active"}
 
 @app.get("/api/mess-pricing")
-def get_mess_pricing(db: Session = Depends(get_db)):
-    pricing = db.query(DBMessPricing).all()
+def get_mess_pricing(mess_id: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    query = db.query(DBMessPricing)
+    if mess_id:
+        query = query.filter(DBMessPricing.mess_id == mess_id)
+    pricing = query.all()
     return [
         {
             "id": p.id,
+            "mess_id": p.mess_id,
             "location_name": p.location_name,
             "three_time_rate": p.three_time_rate,
             "two_time_rate": p.two_time_rate
         } for p in pricing
     ]
+
+@app.post("/api/mess/update-location-price")
+def update_mess_location_price(
+    req: UpdateMessLocationPricingRequest, 
+    user: dict = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    if user["role"] not in ["mess_partner", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized action.")
+    
+    item = db.query(DBMessPricing).filter(
+        DBMessPricing.mess_id == req.mess_id,
+        DBMessPricing.location_name.ilike(req.location_name)
+    ).first()
+    
+    if not item:
+        item = DBMessPricing(
+            mess_id=req.mess_id,
+            location_name=req.location_name,
+            three_time_rate=req.three_time_rate,
+            two_time_rate=req.two_time_rate
+        )
+        db.add(item)
+    else:
+        item.three_time_rate = req.three_time_rate
+        item.two_time_rate = req.two_time_rate
+
+    db.commit()
+    return {"status": "success", "message": f"Updated rates for {req.location_name} successfully!"}
 
 @app.post("/api/auth/register")
 def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -791,8 +854,15 @@ def create_mess_listing(
         description=req.description
     )
     db.add(new_mess)
+
+    db.add_all([
+        DBMessPricing(mess_id=mess_id, location_name="GEC Main Gate", three_time_rate=100, two_time_rate=80),
+        DBMessPricing(mess_id=mess_id, location_name="Chandankiyari", three_time_rate=90, two_time_rate=70),
+        DBMessPricing(mess_id=mess_id, location_name="Ghoragara", three_time_rate=110, two_time_rate=85)
+    ])
+
     db.commit()
-    return {"status": "success", "message": f"Mess '{req.name}' listed successfully!", "mess_id": mess_id}
+    return {"status": "success", "message": f"Mess '{req.name}' listed successfully with dynamic location pricing!", "mess_id": mess_id}
 
 @app.post("/api/mess/update-price")
 def update_mess_price(req: UpdateMessPriceRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1543,4 +1613,3 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
