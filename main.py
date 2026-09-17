@@ -353,6 +353,7 @@ class DBNotification(Base):
     __tablename__ = "notifications"
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
     recipient_role: Mapped[str] = mapped_column(String, nullable=False)
+    recipient_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(String, default="general")
@@ -366,6 +367,11 @@ def seed_database():
         inspector = inspect(engine)
 
         with engine.connect() as conn:
+            if "notifications" in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns("notifications")]
+                if "recipient_id" not in cols:
+                    conn.execute(text("ALTER TABLE notifications ADD COLUMN recipient_id TEXT DEFAULT NULL;"))
+
             if "mess_pricing" in inspector.get_table_names():
                 cols = [c["name"] for c in inspector.get_columns("mess_pricing")]
                 if "mess_id" not in cols:
@@ -487,7 +493,7 @@ def seed_database():
         print(f"[DATABASE NOTICE] Seed skipped or DB offline: {e}")
 
 
-app = FastAPI(title="Basera Multi-Portal API", version="15.0.0")
+app = FastAPI(title="Basera Multi-Portal API", version="16.0.0")
 
 @app.middleware("http")
 async def cors_handler(request: Request, call_next):
@@ -525,27 +531,37 @@ def get_db():
     finally:
         db.close()
 
-# ─── ENHANCED NOTIFICATION ENGINE ────────────────────────────────────
+# ─── TARGETED NOTIFICATION ENGINE (ADMIN EXCLUSION SUPPORT) ─────────
 def notify_owner_and_email(
     db: Session,
     background_tasks: BackgroundTasks,
     recipient_role: str,
     title: str,
     message: str,
-    event_type: str = "general"
+    event_type: str = "general",
+    recipient_user_id: Optional[str] = None,
+    include_admin: bool = False
 ):
     db.add(DBNotification(
         id=f"notif-{uuid.uuid4().hex[:8]}",
         recipient_role=recipient_role,
+        recipient_id=recipient_user_id,
         title=title,
         message=message,
         event_type=event_type,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M")
     ))
 
-    target_users = db.query(DBUser).filter(
-        or_(DBUser.role == recipient_role, DBUser.role == "admin")
-    ).all()
+    if recipient_user_id:
+        query_filter = [DBUser.id == recipient_user_id]
+        if include_admin:
+            query_filter.append(DBUser.role == "admin")
+        target_users = db.query(DBUser).filter(or_(*query_filter)).all()
+    else:
+        query_filter = [DBUser.role == recipient_role]
+        if include_admin:
+            query_filter.append(DBUser.role == "admin")
+        target_users = db.query(DBUser).filter(or_(*query_filter)).all()
 
     for target in target_users:
         if target.email:
@@ -761,7 +777,6 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
 
 @app.post("/api/auth/login")
 def login_user(req: LoginRequest, db: Session = Depends(get_db)):
-    # Build query filtering strictly by email, password, and target_role
     query = db.query(DBUser).filter(
         DBUser.email == req.email, 
         DBUser.password == req.password
@@ -770,7 +785,6 @@ def login_user(req: LoginRequest, db: Session = Depends(get_db)):
     if req.target_role:
         query = query.filter(DBUser.role == req.target_role)
 
-    # Strictly check for a match without fallback
     user = query.first()
     if not user:
         role_label = req.target_role.replace('_', ' ').title() if req.target_role else "selected"
@@ -866,7 +880,7 @@ def create_mess_listing(
     new_mess = DBMessListing(
         id=mess_id,
         name=req.name,
-        provider_name=req.provider_name,
+        provider_name=req.provider_name or user["full_name"],
         monthly_price=req.monthly_price,
         diet_type=req.diet_type,
         meals_per_day=req.meals_per_day,
@@ -885,6 +899,23 @@ def create_mess_listing(
 
     db.commit()
     return {"status": "success", "message": f"Mess '{req.name}' listed successfully with dynamic location pricing!", "mess_id": mess_id}
+
+@app.delete("/api/mess-listings/{mess_id}")
+def delete_mess_listing(mess_id: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete mess listings.")
+
+    mess = db.query(DBMessListing).filter(DBMessListing.id == mess_id).first()
+    if not mess:
+        mess = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{mess_id}%")).first()
+    if not mess:
+        raise HTTPException(status_code=404, detail="Mess listing not found.")
+
+    db.query(DBMessPricing).filter(DBMessPricing.mess_id == mess.id).delete()
+    db.delete(mess)
+    db.commit()
+
+    return {"status": "success", "message": f"Mess listing '{mess.name}' deleted successfully."}
 
 @app.post("/api/mess/update-price")
 def update_mess_price(req: UpdateMessPriceRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1053,7 +1084,7 @@ def verify_payment_and_fulfill(
         date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ))
 
-    is_mess_item = "Mess" in req.item_name
+    is_mess_item = any(k in req.item_name.lower() for k in ["mess", "thali", "meal", "food", "archana", "annapurna"])
     target_type = "Mess Subscription" if is_mess_item else "PG Room"
 
     booking_id = f"b-{uuid.uuid4().hex[:8]}"
@@ -1071,12 +1102,19 @@ def verify_payment_and_fulfill(
     ))
 
     if is_mess_item:
+        extracted_mess_name = req.item_name.split("(")[0].strip() if "(" in req.item_name else req.item_name
+        mess_listing = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{extracted_mess_name}%")).first()
+        target_owner = None
+        if mess_listing:
+            target_owner = db.query(DBUser).filter(
+                DBUser.role == "mess_partner", 
+                DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")
+            ).first()
+
         ms = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
         duration = req.duration_days if req.duration_days and req.duration_days > 0 else 30
         new_expiry = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d")
         diet_choice = req.diet_preference or "Veg"
-        
-        extracted_mess_name = req.item_name.split("(")[0].strip() if "(" in req.item_name else req.item_name
 
         if ms:
             ms.is_active = True
@@ -1100,13 +1138,16 @@ def verify_payment_and_fulfill(
                 expiry_date=new_expiry
             ))
 
+        # Notify strictly Mess Owner (include_admin=False)
         notify_owner_and_email(
             db=db,
             background_tasks=background_tasks,
             recipient_role="mess_partner",
+            recipient_user_id=target_owner.id if target_owner else None,
             title="New Mess Subscription Confirmed",
             message=f"Student '{user['full_name']}' ({user['phone']}) subscribed to '{req.item_name}' (Diet Preference: {diet_choice}, Amount Paid: ₹{req.monthly_amount}, Duration: {duration} days). Delivery Address: {user['address']}",
-            event_type="mess_payment"
+            event_type="mess_payment",
+            include_admin=False
         )
     else:
         vacant_room = db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").first()
@@ -1116,13 +1157,15 @@ def verify_payment_and_fulfill(
             vacant_room.tenant_phone = user["phone"]
             vacant_room.tenant_address = user["address"]
 
+        # Notify strictly PG Owner (include_admin=False)
         notify_owner_and_email(
             db=db,
             background_tasks=background_tasks,
             recipient_role="pg_owner",
             title="New Room Booking Paid & Confirmed",
             message=f"Student '{user['full_name']}' ({user['phone']}) paid ₹{req.monthly_amount} for '{req.item_name}'. Move-in Date: {req.move_in_date}.",
-            event_type="booking"
+            event_type="booking",
+            include_admin=False
         )
 
     db.commit()
@@ -1175,13 +1218,23 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
     )
     db.add(new_cancel)
 
+    student_rec = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
+    target_owner = None
+    if student_rec and student_rec.mess_name:
+        mess_listing = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{student_rec.mess_name}%")).first()
+        if mess_listing:
+            target_owner = db.query(DBUser).filter(DBUser.role == "mess_partner", DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")).first()
+
+    # Admin explicitly excluded (include_admin=False)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
         recipient_role="mess_partner",
+        recipient_user_id=target_owner.id if target_owner else None,
         title=f"Meal Canceled: {req.meal_type} ({target_date})",
         message=f"Student '{user['full_name']}' ({user['phone']}) canceled {req.meal_type} for date {target_date}. Refund credited: ₹{refund_coins}.",
-        event_type="meal_cancel"
+        event_type="meal_cancel",
+        include_admin=False
     )
 
     db.commit()
@@ -1224,13 +1277,23 @@ def uncancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, use
 
     db.delete(cancel_rec)
 
+    student_rec = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
+    target_owner = None
+    if student_rec and student_rec.mess_name:
+        mess_listing = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{student_rec.mess_name}%")).first()
+        if mess_listing:
+            target_owner = db.query(DBUser).filter(DBUser.role == "mess_partner", DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")).first()
+
+    # Admin explicitly excluded (include_admin=False)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
         recipient_role="mess_partner",
+        recipient_user_id=target_owner.id if target_owner else None,
         title=f"Meal Restored: {req.meal_type} ({target_date})",
         message=f"Student '{user['full_name']}' restored {req.meal_type} for {target_date}. Please count this meal in kitchen prep.",
-        event_type="meal_restore"
+        event_type="meal_restore",
+        include_admin=False
     )
 
     db.commit()
@@ -1418,7 +1481,8 @@ def request_student_vacate(req: RequestStudentVacate, background_tasks: Backgrou
         recipient_role="pg_owner",
         title="Room Vacate Request Submitted",
         message=f"Student '{user['full_name']}' ({user['phone']}) requested to vacate Room {room_num}.",
-        event_type="vacate_request"
+        event_type="vacate_request",
+        include_admin=False
     )
 
     db.commit()
@@ -1529,7 +1593,8 @@ def raise_complaint(req: ComplaintCreateRequest, background_tasks: BackgroundTas
         recipient_role=target_role,
         title=f"New Complaint Raised ({req.category})",
         message=f"Student '{user['full_name']}' ({user['phone']}) raised a complaint.\nTitle: {req.title}\nDetails: {req.description}",
-        event_type="complaint"
+        event_type="complaint",
+        include_admin=False
     )
 
     db.commit()
@@ -1570,9 +1635,16 @@ def resolve_complaint(req: ResolveComplaintRequest, background_tasks: Background
 
 @app.get("/api/notifications")
 def get_notifications(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    notifs = db.query(DBNotification).filter(
-        or_(DBNotification.recipient_role == user["role"], DBNotification.recipient_role == "all")
-    ).order_by(DBNotification.created_at.desc()).all()
+    if user["role"] == "admin":
+        notifs = db.query(DBNotification).order_by(DBNotification.created_at.desc()).all()
+    else:
+        notifs = db.query(DBNotification).filter(
+            or_(
+                DBNotification.recipient_id == user["id"],
+                and_(DBNotification.recipient_id == None, DBNotification.recipient_role == user["role"]),
+                DBNotification.recipient_role == "all"
+            )
+        ).order_by(DBNotification.created_at.desc()).all()
 
     return [{"id": n.id, "title": n.title, "message": n.message, "event_type": n.event_type, "created_at": n.created_at} for n in notifs]
 
@@ -1626,6 +1698,7 @@ def get_admin_metrics(db: Session = Depends(get_db)):
     return {
         "active_students": db.query(DBMessStudent).filter(DBMessStudent.is_active == True).count(),
         "pg_listings": db.query(DBPGListing).count(),
+        "total_messes": db.query(DBMessListing).count(),
         "vacant_rooms": db.query(DBPGRoom).filter(DBPGRoom.status == "vacant").count(),
         "total_users": db.query(DBUser).count(),
         "pending_vacate_requests": db.query(DBVacateRequest).filter(DBVacateRequest.status == "Pending").count(),
@@ -1635,5 +1708,4 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 @app.get("/api/admin/users")
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
-
 
