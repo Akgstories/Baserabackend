@@ -224,11 +224,19 @@ class DBUser(Base):
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=GEC+Bokaro")
     role: Mapped[str] = mapped_column(String, default="student")
     token: Mapped[str] = mapped_column(String, nullable=True)
+
+    # Razorpay Route Linked Account Fields
+    razorpay_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True) # acc_XXXXXXXXXXXXXX
+    bank_account_no: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bank_ifsc: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    account_holder_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    pan_number: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class DBPGListing(Base):
     __tablename__ = "pg_listings"
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    owner_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # <-- ADD THIS LINE
     name: Mapped[str] = mapped_column(String, nullable=False)
     distance_km: Mapped[float] = mapped_column(Float, nullable=False)
     gender_pref: Mapped[str] = mapped_column(String, nullable=False)
@@ -241,7 +249,7 @@ class DBPGListing(Base):
     rating: Mapped[str] = mapped_column(String, nullable=False)
     amenities: Mapped[str] = mapped_column(Text, nullable=False)
     images: Mapped[str] = mapped_column(Text, default="[]")
-
+    
 class DBMessListing(Base):
     __tablename__ = "mess_listings"
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
@@ -331,12 +339,20 @@ class DBBooking(Base):
 class DBPaymentReceipt(Base):
     __tablename__ = "payment_receipts"
     transaction_id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    order_id: Mapped[str] = mapped_column(String, nullable=False)
+    booking_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    payer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    vendor_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    vendor_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     payer_name: Mapped[str] = mapped_column(String, nullable=False)
     payer_phone: Mapped[str] = mapped_column(String, nullable=False)
-    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    platform_fee: Mapped[float] = mapped_column(Float, default=0.0)
+    vendor_payout_amount: Mapped[float] = mapped_column(Float, nullable=False)
     payment_method: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
-    date: Mapped[str] = mapped_column(String, nullable=False)
+    route_transfer_status: Mapped[str] = mapped_column(String, default="Pending")
+    payment_date: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 class DBComplaint(Base):
     __tablename__ = "complaints"
@@ -359,6 +375,11 @@ class DBNotification(Base):
     event_type: Mapped[str] = mapped_column(String, default="general")
     created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
+class VendorRouteOnboardRequest(BaseModel):
+    account_holder_name: str
+    bank_account_no: str
+    bank_ifsc: str
+    pan_number: str
 
 # ─── DATABASE INITIALIZATION ──────────────────────────────────────────
 def seed_database():
@@ -1033,30 +1054,6 @@ def get_pgs(gender_pref: Optional[str] = Query(None), search: Optional[str] = Qu
 
     return result
 
-@app.post("/api/payments/create-order")
-def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user)):
-    try:
-        order_data = {
-            "amount": req.amount * 100,
-            "currency": "INR",
-            "receipt": f"rcpt_{uuid.uuid4().hex[:8]}",
-            "notes": {
-                "user_id": user["id"],
-                "student_name": user["full_name"],
-                "item_name": req.item_name
-            }
-        }
-        order = razorpay_client.order.create(data=order_data)  # type: ignore
-        return {
-            "status": "success",
-            "order_id": order["id"],
-            "amount": order["amount"],
-            "currency": order["currency"],
-            "key_id": RAZORPAY_KEY_ID
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create payment order: {str(e)}")
-
 @app.post("/api/payments/verify")
 def verify_payment_and_fulfill(
     req: VerifyPaymentRequest, 
@@ -1709,3 +1706,136 @@ def get_admin_metrics(db: Session = Depends(get_db)):
 def get_admin_users(db: Session = Depends(get_db)):
     return [{"id": u.id, "full_name": u.full_name, "email": u.email, "phone": u.phone, "address": u.address, "google_map_url": u.google_map_url, "role": u.role} for u in db.query(DBUser).all()]
 
+@app.post("/api/vendor/onboard-route")
+def onboard_vendor_razorpay_route(
+    req: VendorRouteOnboardRequest,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Creates a Razorpay Route Linked Account on behalf of the vendor via API."""
+    if user["role"] not in ["mess_partner", "pg_owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Only service providers can set up direct payouts.")
+
+    clean_pan = req.pan_number.strip().upper()
+    clean_ifsc = req.bank_ifsc.strip().upper()
+    clean_acc = req.bank_account_no.strip()
+    clean_name = req.account_holder_name.strip()
+
+    if len(clean_pan) != 10:
+        raise HTTPException(status_code=400, detail="Invalid PAN Card Number. Must be 10 characters.")
+
+    db_user = db.query(DBUser).filter(DBUser.id == user["id"]).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    try:
+        # 1. Create Linked Account via Razorpay API
+        account_payload = {
+            "email": db_user.email,
+            "phone": db_user.phone or "9155118661",
+            "legal_business_name": clean_name,
+            "business_type": "individual",
+            "profile": {
+                "category": "housing",
+                "subcategory": "real_estate_agents"
+            },
+            "legal_info": {
+                "pan": clean_pan
+            }
+        }
+
+        # Create account using Razorpay SDK
+        acc_response = razorpay_client.account.create(account_payload) # type: ignore
+        linked_account_id = acc_response["id"] # Generates "acc_XXXXXXXXXXXXXX"
+
+        # 2. Attach Vendor Bank Account to Linked Account
+        bank_payload = {
+            "ifsc_code": clean_ifsc,
+            "account_number": clean_acc,
+            "beneficiary_name": clean_name
+        }
+        razorpay_client.account.bank_account(linked_account_id, bank_payload) # type: ignore
+
+        # 3. Save to Database
+        db_user.razorpay_account_id = linked_account_id
+        db_user.bank_account_no = clean_acc
+        db_user.bank_ifsc = clean_ifsc
+        db_user.account_holder_name = clean_name
+        db_user.pan_number = clean_pan
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Razorpay Direct Account activated successfully!",
+            "razorpay_account_id": linked_account_id
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Razorpay Onboarding Error: {str(e)}")
+
+
+@app.post("/api/payments/create-order")
+def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Creates a Razorpay order with instant 95/5 multi-vendor split transfer."""
+    try:
+        total_paise = req.amount * 100
+        vendor_account_id = None
+
+        # Determine target vendor
+        is_mess_item = any(k in req.item_name.lower() for k in ["mess", "thali", "meal", "food", "archana", "annapurna"])
+        
+        if is_mess_item:
+            extracted_name = req.item_name.split("(")[0].strip() if "(" in req.item_name else req.item_name
+            mess = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{extracted_name}%")).first()
+            if mess:
+                owner = db.query(DBUser).filter(DBUser.role == "mess_partner", DBUser.full_name.ilike(f"%{mess.provider_name}%")).first()
+                if owner and owner.razorpay_account_id:
+                    vendor_account_id = owner.razorpay_account_id
+        else:
+            pg = db.query(DBPGListing).filter(DBPGListing.name.ilike(f"%{req.item_name}%")).first()
+            if pg and pg.owner_id:
+                owner = db.query(DBUser).filter(DBUser.id == pg.owner_id).first()
+                if owner and owner.razorpay_account_id:
+                    vendor_account_id = owner.razorpay_account_id
+
+        order_data = {
+            "amount": total_paise,
+            "currency": "INR",
+            "receipt": f"rcpt_{uuid.uuid4().hex[:8]}",
+            "notes": {
+                "user_id": user["id"],
+                "student_name": user["full_name"],
+                "item_name": req.item_name
+            }
+        }
+
+        # Attach dynamic transfer split if vendor has set up direct payments
+        if vendor_account_id:
+            platform_fee_paise = int(total_paise * 0.05)       # 5% Platform Fee
+            vendor_payout_paise = total_paise - platform_fee_paise # 95% Direct to Vendor A/C
+
+            order_data["transfers"] = [
+                {
+                    "account": vendor_account_id,
+                    "amount": vendor_payout_paise,
+                    "currency": "INR",
+                    "on_hold": 0, # 0 = Instant settlement directly to vendor's bank
+                    "notes": {
+                        "item_name": req.item_name,
+                        "student_name": user["full_name"]
+                    }
+                }
+            ]
+
+        order = razorpay_client.order.create(data=order_data) # type: ignore
+
+        return {
+            "status": "success",
+            "order_id": order["id"],
+            "amount": order["amount"],
+            "currency": order["currency"],
+            "key_id": RAZORPAY_KEY_ID,
+            "direct_split_active": bool(vendor_account_id)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create split order: {str(e)}")
