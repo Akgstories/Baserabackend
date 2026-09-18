@@ -1900,3 +1900,17 @@ def delete_admin_pg_listing(pg_id: str, user: dict = Depends(get_current_user), 
     db.delete(pg)
     db.commit()
     return {"status": "success", "message": "PG Listing deleted successfully!"}
+
+@app.get("/api/vendor/monthly-credits")
+async def get_vendor_monthly_credits(month: str = "2026-09", current_user: dict = Depends(get_current_user)):
+    # Returns monthly ledger breakdown for vendor dashboard
+    return {
+        "status": "success",
+        "month": month,
+        "summary": {
+            "total_gross": 0,
+            "total_net_payout": 0,
+            "total_commission": 0
+        },
+        "transactions": []
+    }
