@@ -692,6 +692,18 @@ class TestEmailRequest(BaseModel):
     subject: Optional[str] = "Basera Diagnostic Test Email"
     body: Optional[str] = "This is a live test email sent from the Basera Admin Console."
 
+class CreatePGRequest(BaseModel):
+    name: str
+    distance_km: float
+    gender_pref: str
+    sharing: str
+    monthly_price: int
+    address: str
+    rating: str = "4.5"
+    amenities: str = "Wi-Fi, RO Water, Security"
+
+
+
 def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authentication token.")
@@ -1845,3 +1857,46 @@ def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_curre
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create split order: {str(e)}")
+
+@app.get("/api/admin/pg-listings")
+def get_admin_pg_listings(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required.")
+    return db.query(DBPGListing).all()
+
+@app.post("/api/admin/pg-listings")
+def create_admin_pg_listing(req: CreatePGRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required.")
+    
+    new_pg = DBPGListing(
+        id=f"pg-{uuid.uuid4().hex[:6]}",
+        owner_id=user["id"],
+        name=req.name,
+        distance_km=req.distance_km,
+        gender_pref=req.gender_pref,
+        sharing=req.sharing,
+        monthly_price=req.monthly_price,
+        tag_label="Verified PG",
+        address=req.address,
+        google_map_url="https://maps.google.com/?q=Bokaro",
+        rating=req.rating,
+        amenities=req.amenities,
+        images="[]"
+    )
+    db.add(new_pg)
+    db.commit()
+    return {"status": "success", "message": "PG Listing added successfully!"}
+
+@app.delete("/api/admin/pg-listings/{pg_id}")
+def delete_admin_pg_listing(pg_id: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required.")
+    
+    pg = db.query(DBPGListing).filter(DBPGListing.id == pg_id).first()
+    if not pg:
+        raise HTTPException(status_code=404, detail="PG listing not found.")
+    
+    db.delete(pg)
+    db.commit()
+    return {"status": "success", "message": "PG Listing deleted successfully!"}
