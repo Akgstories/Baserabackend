@@ -35,12 +35,17 @@ def get_ist_now() -> datetime:
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    safe_password = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+    return pwd_context.hash(safe_password)
 
 def verify_and_update_password(plain_password: str, stored_password: str) -> tuple[bool, bool]:
+    safe_password = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
     if stored_password.startswith("$2b$") or stored_password.startswith("$2a$"):
-        return pwd_context.verify(plain_password, stored_password), False
-    if plain_password == stored_password:
+        try:
+            return pwd_context.verify(safe_password, stored_password), False
+        except Exception:
+            return False, False
+    if safe_password == stored_password:
         return True, True  
     return False, False
 
