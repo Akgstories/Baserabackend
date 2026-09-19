@@ -2,6 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 pydantic
-psycopg2-binary
-Pillow
+passlib
+bcrypt
+pillow
 razorpay
