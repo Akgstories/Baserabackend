@@ -448,7 +448,6 @@ class DBNotification(Base):
 
 # ─── DATABASE MIGRATIONS & SEEDING ──────────────────────────────────
 
-
 def seed_database():
     try:
         Base.metadata.create_all(bind=engine)
@@ -456,6 +455,8 @@ def seed_database():
 
         with engine.connect() as conn:
             tables = inspector.get_table_names()
+
+            # 1. pg_rooms column migrations
             if "pg_rooms" in tables:
                 pg_cols = [c["name"] for c in inspector.get_columns("pg_rooms")]
                 if "pg_id" not in pg_cols:
@@ -467,6 +468,7 @@ def seed_database():
                 if "tenant_address" not in pg_cols:
                     conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN tenant_address VARCHAR DEFAULT NULL;"))
 
+            # 2. users column migrations (Safe PostgreSQL auto_settle boolean conversion)
             if "users" in tables:
                 cols = [c["name"] for c in inspector.get_columns("users")]
                 if "settlement_tenure" not in cols:
@@ -475,7 +477,6 @@ def seed_database():
                 if "auto_settle" not in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT TRUE;"))
                 else:
-                    # Fix: Convert existing auto_settle column type and default expression safely for PostgreSQL
                     try:
                         conn.execute(text("ALTER TABLE users ALTER COLUMN auto_settle DROP DEFAULT;"))
                         conn.execute(text("ALTER TABLE users ALTER COLUMN auto_settle TYPE BOOLEAN USING (auto_settle::boolean);"))
@@ -487,6 +488,19 @@ def seed_database():
                     conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR DEFAULT '';"))
                     conn.execute(text("UPDATE users SET password_hash = password WHERE password_hash = '';"))
 
+            # 3. mess_students column migrations (Fixes "column user_id does not exist" error)
+            if "mess_students" in tables:
+                ms_cols = [c["name"] for c in inspector.get_columns("mess_students")]
+                if "user_id" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN user_id VARCHAR DEFAULT NULL;"))
+                if "google_map_url" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN google_map_url TEXT DEFAULT 'https://maps.google.com/?q=GEC+Bokaro+Hostel';"))
+                if "mess_id" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_id VARCHAR DEFAULT NULL;"))
+                if "mess_name" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_name VARCHAR DEFAULT 'Annapurna Homely Mess';"))
+
+            # 4. payment_receipts column migrations
             if "payment_receipts" in tables:
                 cols = [c["name"] for c in inspector.get_columns("payment_receipts")]
                 if "route_transfer_id" not in cols:
@@ -496,11 +510,13 @@ def seed_database():
                 if "settlement_due_date" not in cols:
                     conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN settlement_due_date VARCHAR DEFAULT NULL;"))
 
+            # 5. pg_listings column migrations
             if "pg_listings" in tables:
                 cols = [c["name"] for c in inspector.get_columns("pg_listings")]
                 if "owner_id" not in cols:
                     conn.execute(text("ALTER TABLE pg_listings ADD COLUMN owner_id VARCHAR DEFAULT NULL;"))
 
+            # 6. mess_listings column migrations
             if "mess_listings" in tables:
                 cols = [c["name"] for c in inspector.get_columns("mess_listings")]
                 if "owner_id" not in cols:
@@ -508,6 +524,7 @@ def seed_database():
 
             conn.commit()
 
+        # Seed initial system admin and sample vendor data safely
         db = SessionLocal()
         admin_user = db.query(DBUser).filter(DBUser.role == "admin").first()
         if not admin_user:
@@ -592,21 +609,21 @@ def seed_database():
         if not db.query(DBMessListing).first():
             db.add_all([
                 DBMessListing(
-                    id="mess-1", owner_id=mess1_partner.id, name="Annapurna Homely Mess", provider_name="Ramesh Sharma",
+                    id="mess-1", owner_id=mess1_partner.id if mess1_partner else None, name="Annapurna Homely Mess", provider_name="Ramesh Sharma",
                     monthly_price=3000, diet_type="Veg & Non-Veg", meals_per_day="Flexible Plan Options",
                     rating="4.9 (42 reviews)", address="📍 Near GEC Bokaro Main Gate",
                     google_map_url="https://maps.google.com/?q=GEC+Bokaro+Main+Gate",
                     description="Freshly prepared hygienic meals tailored for engineering students."
                 ),
                 DBMessListing(
-                    id="mess-2", owner_id=mess2_partner.id, name="Shuddha Shakahari Mess", provider_name="Geeta Devi",
+                    id="mess-2", owner_id=mess2_partner.id if mess2_partner else None, name="Shuddha Shakahari Mess", provider_name="Geeta Devi",
                     monthly_price=2600, diet_type="Pure Veg", meals_per_day="Flexible Plan Options",
                     rating="4.8 (31 reviews)", address="📍 Vill-Ghoragara, Chandankiyari",
                     google_map_url="https://maps.google.com/?q=Chandankiyari+Bokaro",
                     description="100% Pure Vegetarian North & South Indian meals cooked with pure desi ghee."
                 ),
                 DBMessListing(
-                    id="mess-3", owner_id=mess3_partner.id, name="Archana mess", provider_name="Archana Devi",
+                    id="mess-3", owner_id=mess3_partner.id if mess3_partner else None, name="Archana mess", provider_name="Archana Devi",
                     monthly_price=3600, diet_type="Veg & Non-Veg", meals_per_day="Flexible Plan Options",
                     rating="5.0 (New)", address="📍 Near GEC Bokaro",
                     google_map_url="https://maps.google.com/?q=GEC+Bokaro",
@@ -643,14 +660,14 @@ def seed_database():
         if not db.query(DBPGListing).first():
             db.add_all([
                 DBPGListing(
-                    id="pg-1", owner_id=pg_owner1.id, name="Power Grid Scholars Boys PG", distance_km=0.4,
+                    id="pg-1", owner_id=pg_owner1.id if pg_owner1 else None, name="Power Grid Scholars Boys PG", distance_km=0.4,
                     gender_pref="Boys PG", sharing="Double Sharing", has_ac=True, monthly_price=4200,
                     tag_label="Vacant", address="📍 Vill-Ghoragara, P.O-Kherabera, Chandankiyari",
                     google_map_url="https://maps.google.com/?q=23.5750,86.3500",
                     rating="4.9 (28)", amenities=json.dumps(["High-Speed Wi-Fi", "Homely Mess Available", "24/7 Power Backup", "RO Purified Water"]), images="[]"
                 ),
                 DBPGListing(
-                    id="pg-2", owner_id=pg_owner1.id, name="Chandankiyari Comfort Girls PG", distance_km=0.2,
+                    id="pg-2", owner_id=pg_owner1.id if pg_owner1 else None, name="Chandankiyari Comfort Girls PG", distance_km=0.2,
                     gender_pref="Girls PG", sharing="Single Room", has_ac=True, monthly_price=4800,
                     tag_label="1 left", address="📍 P.O-Kherabera, Chandankiyari, Bokaro",
                     google_map_url="https://maps.google.com/?q=23.5780,86.3520",
@@ -668,9 +685,9 @@ def seed_database():
             db.commit()
 
         db.close()
-        print("[DATABASE] Initialization & seeding completed successfully!")
+        print("[DATABASE] Initialization & migrations completed successfully!")
     except Exception as e:
-        print(f"[DATABASE NOTICE] Seed skipped or DB already initialized: {e}")
+        print(f"[DATABASE NOTICE] Seed skipped or DB migration issue: {e}")
 
 
 # ─── FASTAPI APPLICATION INITIALIZATION ──────────────────────────────
