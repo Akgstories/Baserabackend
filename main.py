@@ -471,8 +471,18 @@ def seed_database():
                 cols = [c["name"] for c in inspector.get_columns("users")]
                 if "settlement_tenure" not in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN settlement_tenure VARCHAR DEFAULT 'instant';"))
+    
                 if "auto_settle" not in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT TRUE;"))
+                else:
+                    # Fix: Convert existing auto_settle column type and default expression safely for PostgreSQL
+                    try:
+                        conn.execute(text("ALTER TABLE users ALTER COLUMN auto_settle DROP DEFAULT;"))
+                        conn.execute(text("ALTER TABLE users ALTER COLUMN auto_settle TYPE BOOLEAN USING (auto_settle::boolean);"))
+                        conn.execute(text("ALTER TABLE users ALTER COLUMN auto_settle SET DEFAULT TRUE;"))
+                    except Exception as col_err:
+                        print(f"[MIGRATION NOTICE] auto_settle cast skipped or already boolean: {col_err}")
+
                 if "password_hash" not in cols and "password" in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR DEFAULT '';"))
                     conn.execute(text("UPDATE users SET password_hash = password WHERE password_hash = '';"))
