@@ -1199,7 +1199,12 @@ def verify_payment_and_fulfill(
     return {"status": "success", "message": f"Payment verified successfully! {req.item_name} activated."}
 
 @app.post("/api/mess/cancel-meal")
-def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def cancel_meal(
+    req: MealCancelRequest, 
+    background_tasks: BackgroundTasks, 
+    user: dict = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
     target_date = req.date if req.date else datetime.now().strftime("%Y-%m-%d")
     today_str = datetime.now().strftime("%Y-%m-%d")
     now_time = datetime.now().time()
@@ -1207,19 +1212,56 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
     if target_date < today_str:
         raise HTTPException(status_code=400, detail="Cannot cancel meals for past dates.")
 
+    # 1. Enforce Active Mess Subscription Check
+    student = db.query(DBMessStudent).filter(
+        DBMessStudent.name.ilike(user["full_name"]),
+        DBMessStudent.is_active == True
+    ).first()
+
+    if not student or not student.is_active or student.plan == "Unsubscribed":
+        raise HTTPException(
+            status_code=403, 
+            detail="No active mess subscription found. Please subscribe to a mess plan first."
+        )
+
+    # 2. Prevent Cancellation Beyond Expiry Date
+    if student.expiry_date and target_date > student.expiry_date:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot cancel meals beyond your subscription expiry date ({student.expiry_date})."
+        )
+
+    # Cutoff Timings
     cutoffs = {
-        "Breakfast": (datetime.strptime("07:00", "%H:%M").time(), 30),
-        "Lunch": (datetime.strptime("10:00", "%H:%M").time(), 50),
-        "Dinner": (datetime.strptime("18:00", "%H:%M").time(), 50)
+        "Breakfast": datetime.strptime("07:00", "%H:%M").time(),
+        "Lunch": datetime.strptime("10:00", "%H:%M").time(),
+        "Dinner": datetime.strptime("18:00", "%H:%M").time()
     }
 
     if req.meal_type not in cutoffs:
         raise HTTPException(status_code=400, detail="Invalid meal type.")
 
-    cutoff_time, refund_coins = cutoffs[req.meal_type]
+    if target_date == today_str and now_time > cutoffs[req.meal_type]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cutoff time ({cutoffs[req.meal_type].strftime('%I:%M %p')}) for {req.meal_type} has passed for today."
+        )
 
-    if target_date == today_str and now_time > cutoff_time:
-        raise HTTPException(status_code=400, detail=f"Cutoff time ({cutoff_time.strftime('%I:%M %p')}) for {req.meal_type} has passed for today.")
+    # 3. Dynamic Refund Rate per Meal
+    mess_listing = db.query(DBMessListing).filter(
+        DBMessListing.name.ilike(f"%{student.mess_name}%")
+    ).first()
+
+    if mess_listing and mess_listing.monthly_price:
+        daily_rate = mess_listing.monthly_price / 30.0
+    elif student.base_price:
+        daily_rate = student.base_price / 30.0
+    else:
+        daily_rate = 100.0
+
+    # Meal splits: Breakfast 25%, Lunch 37.5%, Dinner 37.5%
+    meal_weights = {"Breakfast": 0.25, "Lunch": 0.375, "Dinner": 0.375}
+    refund_coins = int(round(daily_rate * meal_weights.get(req.meal_type, 0.33)))
 
     existing = db.query(DBMealCancellation).filter(
         DBMealCancellation.student_name == user["full_name"],
@@ -1231,27 +1273,31 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
         raise HTTPException(status_code=400, detail=f"{req.meal_type} for {target_date} is already canceled.")
 
     new_cancel = DBMealCancellation(
-        id=f"mc-{uuid.uuid4().hex[:8]}", student_name=user["full_name"],
-        phone=user["phone"] or "9155118661", meal=req.meal_type,
-        refund_amount=refund_coins, date=target_date, timestamp=datetime.now().strftime("%I:%M %p")
+        id=f"mc-{uuid.uuid4().hex[:8]}", 
+        student_name=user["full_name"],
+        phone=user["phone"] or user["email"], 
+        meal=req.meal_type,
+        refund_amount=refund_coins, 
+        date=target_date, 
+        timestamp=datetime.now().strftime("%I:%M %p")
     )
     db.add(new_cancel)
 
-    student_rec = db.query(DBMessStudent).filter(DBMessStudent.name.ilike(user["full_name"])).first()
+    # Route Notification to Specific Mess Owner
     target_owner = None
-    if student_rec and student_rec.mess_name:
-        mess_listing = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{student_rec.mess_name}%")).first()
-        if mess_listing:
-            target_owner = db.query(DBUser).filter(DBUser.role == "mess_partner", DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")).first()
+    if mess_listing:
+        target_owner = db.query(DBUser).filter(
+            DBUser.role == "mess_partner", 
+            DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")
+        ).first()
 
-    # Admin explicitly excluded (include_admin=False)
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
         recipient_role="mess_partner",
         recipient_user_id=target_owner.id if target_owner else None,
         title=f"Meal Canceled: {req.meal_type} ({target_date})",
-        message=f"Student '{user['full_name']}' ({user['phone']}) canceled {req.meal_type} for date {target_date}. Refund credited: ₹{refund_coins}.",
+        message=f"Student '{user['full_name']}' ({user['phone']}) canceled {req.meal_type} for {target_date}. Calculated Refund: ₹{refund_coins}.",
         event_type="meal_cancel",
         include_admin=False
     )
@@ -1262,11 +1308,10 @@ def cancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user:
         send_email_notification,
         user["email"],
         f"Meal Cancellation Confirmed: {req.meal_type} ({target_date})",
-        f"Hi {user['full_name']},\n\nYour request to cancel {req.meal_type} for {target_date} has been processed.\n\n₹{refund_coins} refund has been credited to your monthly ledger statement."
+        f"Hi {user['full_name']},\n\nYour request to cancel {req.meal_type} for {target_date} has been processed.\n\n₹{refund_coins} refund has been calculated dynamically based on your mess plan rate and credited to your ledger."
     )
 
     return {"status": "success", "message": f"Canceled {req.meal_type} for {target_date}! ₹{refund_coins} credited."}
-
 @app.post("/api/mess/uncancel-meal")
 def uncancel_meal(req: MealCancelRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     target_date = req.date if req.date else datetime.now().strftime("%Y-%m-%d")
