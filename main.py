@@ -259,11 +259,11 @@ class DBUser(Base):
     role: Mapped[str] = mapped_column(String, default="student")
     token: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    razorpay_account_id: Mapped[str] = mapped_column(String, default="", server_default="")
-    bank_account_no: Mapped[str] = mapped_column(String, default="", server_default="")
-    bank_ifsc: Mapped[str] = mapped_column(String, default="", server_default="")
-    account_holder_name: Mapped[str] = mapped_column(String, default="", server_default="")
-    pan_number: Mapped[str] = mapped_column(String, default="", server_default="")
+    razorpay_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    bank_account_no: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    bank_ifsc: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    account_holder_name: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    pan_number: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     settlement_tenure: Mapped[str] = mapped_column(String, default="instant", server_default="instant")
     auto_settle: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default="now()")
@@ -458,8 +458,28 @@ def seed_database():
                     try: conn.execute(text("ALTER TABLE users ADD COLUMN settlement_tenure VARCHAR DEFAULT 'instant';"))
                     except Exception: pass
                 if "auto_settle" not in cols:
-                    try: conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT 1;"))
+                    try: conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT true;"))
                     except Exception: pass
+                # Drop NOT NULL on optional vendor fields so students can register with NULL
+                for _col in ["razorpay_account_id", "bank_account_no", "bank_ifsc", "account_holder_name", "pan_number"]:
+                    try: conn.execute(text(f"ALTER TABLE users ALTER COLUMN {_col} DROP NOT NULL;"))
+                    except Exception: pass
+                # Drop UNIQUE constraints on those vendor columns (NULL is fine for multiple rows)
+                try:
+                    conn.execute(text("""
+                        DO $$ DECLARE r RECORD; BEGIN
+                            FOR r IN (
+                                SELECT tc.constraint_name FROM information_schema.table_constraints tc
+                                JOIN information_schema.key_column_usage kcu
+                                  ON tc.constraint_name=kcu.constraint_name AND tc.table_name=kcu.table_name
+                                WHERE tc.table_name='users' AND tc.constraint_type='UNIQUE'
+                                  AND kcu.column_name IN ('razorpay_account_id','bank_account_no','bank_ifsc','account_holder_name','pan_number')
+                            ) LOOP
+                                EXECUTE 'ALTER TABLE users DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name);
+                            END LOOP;
+                        END $$;
+                    """))
+                except Exception: pass
 
             if "payment_receipts" in tables:
                 cols = [c["name"] for c in inspector.get_columns("payment_receipts")]
