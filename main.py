@@ -1800,12 +1800,19 @@ def onboard_vendor_razorpay_route(
         "razorpay_account_id": db_user.razorpay_account_id
     }
 
+# Inside main_2.py -> create_payment_order endpoint
+
 @app.post("/api/payments/create-order")
 def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Creates a Razorpay order with instant 95/5 multi-vendor split transfer."""
     try:
-        total_paise = req.amount * 100
+        # Force conversion from float rupees to integer paise (e.g. ₹1.5 -> 150 paise)
+        total_paise = int(round(float(req.amount) * 100))
+        
+        if total_paise < 100: # Razorpay minimum order amount is ₹1 (100 paise)
+            total_paise = 100
+            
         vendor_account_id = None
+        # ... rest of your vendor lookup logic ...
 
         # Determine target vendor
         is_mess_item = any(k in req.item_name.lower() for k in ["mess", "thali", "meal", "food", "archana", "annapurna"])
