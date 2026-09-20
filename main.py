@@ -406,6 +406,7 @@ class DBPaymentReceipt(Base):
     tenure_days: Mapped[int] = mapped_column(Integer, default=0)
     settlement_due_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     payment_date: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    date: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # original Supabase column
 
 class DBSettlement(Base):
     __tablename__ = "settlements"
@@ -504,16 +505,15 @@ def seed_database():
                     ("payer_name",            "VARCHAR DEFAULT ''"),
                     ("payer_phone",           "VARCHAR DEFAULT ''"),
                     ("order_id",              "VARCHAR DEFAULT ''"),
+                    ("date",                  "VARCHAR DEFAULT ''"),   # original Supabase column
                 ]:
                     if col_def[0] not in cols:
                         try: conn.execute(text(f"ALTER TABLE payment_receipts ADD COLUMN {col_def[0]} {col_def[1]};"))
                         except Exception: pass
-                # Make original 'amount' column nullable (was NOT NULL, now we use total_amount too)
-                try: conn.execute(text("ALTER TABLE payment_receipts ALTER COLUMN amount DROP NOT NULL;"))
-                except Exception: pass
-                # Make description nullable in case old rows have it empty
-                try: conn.execute(text("ALTER TABLE payment_receipts ALTER COLUMN description DROP NOT NULL;"))
-                except Exception: pass
+                # Drop NOT NULL on original columns to prevent constraint violations
+                for _col in ["amount", "description", "date", "payer_name", "payer_phone", "order_id"]:
+                    try: conn.execute(text(f"ALTER TABLE payment_receipts ALTER COLUMN {_col} DROP NOT NULL;"))
+                    except Exception: pass
 
             if "pg_listings" in tables:
                 cols = [c["name"] for c in inspector.get_columns("pg_listings")]
@@ -1604,7 +1604,7 @@ def verify_payment_and_fulfill(
         payer_phone=user["phone"] or user["email"],
         vendor_id=vendor_user.id if vendor_user else None,
         vendor_account_id=vendor_user.razorpay_account_id if vendor_user else None,
-        amount=total_amt,           # original Supabase column (NOT NULL)
+        amount=total_amt,
         total_amount=total_amt,
         platform_fee=platform_fee,
         vendor_payout_amount=vendor_payout,
@@ -1613,7 +1613,8 @@ def verify_payment_and_fulfill(
         route_transfer_status=transfer_status,
         tenure_days=tenure_days,
         settlement_due_date=settlement_due,
-        payment_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        payment_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")   # original Supabase NOT NULL column
     )
     db.add(receipt)
 
