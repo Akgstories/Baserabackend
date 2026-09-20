@@ -1093,14 +1093,22 @@ def verify_payment_and_fulfill(
         raise HTTPException(status_code=400, detail="Payment verification failed! Invalid signature.")
 
     txn_id = req.razorpay_payment_id
+    total_amt = float(req.monthly_amount)
+    platform_fee = round(total_amt * 0.05, 2)
+    vendor_payout = round(total_amt - platform_fee, 2)
+
     db.add(DBPaymentReceipt(
         transaction_id=txn_id,
+        order_id=req.razorpay_order_id,
+        payer_id=user["id"],
         payer_name=user["full_name"],
         payer_phone=user["phone"] or user["email"],
-        amount=req.monthly_amount,
+        total_amount=total_amt,
+        platform_fee=platform_fee,
+        vendor_payout_amount=vendor_payout,
         payment_method="Razorpay (UPI/Card/NetBanking)",
         description=f"Paid for: {req.item_name}",
-        date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        payment_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ))
 
     is_mess_item = any(k in req.item_name.lower() for k in ["mess", "thali", "meal", "food", "archana", "annapurna"])
@@ -1231,7 +1239,7 @@ def cancel_meal(
             detail=f"Cannot cancel meals beyond your subscription expiry date ({student.expiry_date})."
         )
 
-    # Cutoff Timings
+    # Cutoff Timings Check
     cutoffs = {
         "Breakfast": datetime.strptime("07:00", "%H:%M").time(),
         "Lunch": datetime.strptime("10:00", "%H:%M").time(),
@@ -1247,22 +1255,37 @@ def cancel_meal(
             detail=f"Cutoff time ({cutoffs[req.meal_type].strftime('%I:%M %p')}) for {req.meal_type} has passed for today."
         )
 
-    # 3. Dynamic Refund Rate per Meal
+    # 3. Dynamic Refund Calculation
     mess_listing = db.query(DBMessListing).filter(
         DBMessListing.name.ilike(f"%{student.mess_name}%")
     ).first()
 
-    if mess_listing and mess_listing.monthly_price:
-        daily_rate = mess_listing.monthly_price / 30.0
-    elif student.base_price:
-        daily_rate = student.base_price / 30.0
-    else:
-        daily_rate = 100.0
+    base_price = student.base_price if student.base_price > 0 else (mess_listing.monthly_price if mess_listing else 3000)
+    daily_rate = base_price / 30.0
 
-    # Meal splits: Breakfast 25%, Lunch 37.5%, Dinner 37.5%
     meal_weights = {"Breakfast": 0.25, "Lunch": 0.375, "Dinner": 0.375}
     refund_coins = int(round(daily_rate * meal_weights.get(req.meal_type, 0.33)))
 
+    # 4. CAP CHECK: Prevent Total Monthly Refunds from Exceeding Base Price
+    month_str = target_date[:7]  # YYYY-MM
+    existing_cancels = db.query(DBMealCancellation).filter(
+        DBMealCancellation.student_name == user["full_name"],
+        DBMealCancellation.date.like(f"{month_str}%")
+    ).all()
+
+    current_total_refunds = sum(c.refund_amount for c in existing_cancels)
+
+    if current_total_refunds >= base_price:
+        raise HTTPException(
+            status_code=400, 
+            detail="Maximum refund limit reached for this billing cycle. Total refunds cannot exceed your monthly base price."
+        )
+
+    # Cap refund_coins so cumulative refunds hit base_price exactly, never going above it
+    if current_total_refunds + refund_coins > base_price:
+        refund_coins = int(base_price - current_total_refunds)
+
+    # Check for Duplicate Cancellation
     existing = db.query(DBMealCancellation).filter(
         DBMealCancellation.student_name == user["full_name"],
         DBMealCancellation.date == target_date,
@@ -1272,6 +1295,7 @@ def cancel_meal(
     if existing:
         raise HTTPException(status_code=400, detail=f"{req.meal_type} for {target_date} is already canceled.")
 
+    # Record Cancellation
     new_cancel = DBMealCancellation(
         id=f"mc-{uuid.uuid4().hex[:8]}", 
         student_name=user["full_name"],
@@ -1297,7 +1321,7 @@ def cancel_meal(
         recipient_role="mess_partner",
         recipient_user_id=target_owner.id if target_owner else None,
         title=f"Meal Canceled: {req.meal_type} ({target_date})",
-        message=f"Student '{user['full_name']}' ({user['phone']}) canceled {req.meal_type} for {target_date}. Calculated Refund: ₹{refund_coins}.",
+        message=f"Student '{user['full_name']}' ({user['phone']}) canceled {req.meal_type} for {target_date}. Refund: ₹{refund_coins}.",
         event_type="meal_cancel",
         include_admin=False
     )
@@ -1308,7 +1332,7 @@ def cancel_meal(
         send_email_notification,
         user["email"],
         f"Meal Cancellation Confirmed: {req.meal_type} ({target_date})",
-        f"Hi {user['full_name']},\n\nYour request to cancel {req.meal_type} for {target_date} has been processed.\n\n₹{refund_coins} refund has been calculated dynamically based on your mess plan rate and credited to your ledger."
+        f"Hi {user['full_name']},\n\nYour request to cancel {req.meal_type} for {target_date} has been processed. ₹{refund_coins} has been credited to your monthly ledger."
     )
 
     return {"status": "success", "message": f"Canceled {req.meal_type} for {target_date}! ₹{refund_coins} credited."}
