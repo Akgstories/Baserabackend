@@ -447,6 +447,8 @@ class DBNotification(Base):
 
 
 # ─── DATABASE MIGRATIONS & SEEDING ──────────────────────────────────
+
+
 def seed_database():
     try:
         Base.metadata.create_all(bind=engine)
@@ -454,6 +456,17 @@ def seed_database():
 
         with engine.connect() as conn:
             tables = inspector.get_table_names()
+            if "pg_rooms" in tables:
+                pg_cols = [c["name"] for c in inspector.get_columns("pg_rooms")]
+                if "pg_id" not in pg_cols:
+                    conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN pg_id VARCHAR DEFAULT NULL;"))
+                if "tenant_name" not in pg_cols:
+                    conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN tenant_name VARCHAR DEFAULT NULL;"))
+                if "tenant_phone" not in pg_cols:
+                    conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN tenant_phone VARCHAR DEFAULT NULL;"))
+                if "tenant_address" not in pg_cols:
+                    conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN tenant_address VARCHAR DEFAULT NULL;"))
+                    
             if "users" in tables:
                 cols = [c["name"] for c in inspector.get_columns("users")]
                 if "settlement_tenure" not in cols:
