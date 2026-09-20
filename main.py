@@ -1579,13 +1579,21 @@ def update_room_images(req: UpdateRoomImagesRequest, user: dict = Depends(get_cu
 def get_complaints(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     role = user["role"]
     if role == "student":
-        comps = db.query(DBComplaint).filter(DBComplaint.user_phone == user["phone"]).all()
+        comps = db.query(DBComplaint).filter(
+            or_(
+                DBComplaint.user_phone == user["phone"],
+                DBComplaint.user_phone == user["email"]
+            )
+        ).all()
     elif role == "pg_owner":
         comps = db.query(DBComplaint).filter(DBComplaint.category == "PG Maintenance").all()
     elif role == "mess_partner":
         comps = db.query(DBComplaint).filter(DBComplaint.category == "Mess Quality").all()
     else:
         comps = db.query(DBComplaint).all()
+
+    if not comps:
+        return []
 
     return [{"id": c.id, "user_name": c.user_name, "user_phone": c.user_phone, "category": c.category, "title": c.title, "description": c.description, "status": c.status, "created_at": c.created_at} for c in comps]
 
@@ -1827,17 +1835,17 @@ def create_payment_order(req: CreateOrderRequest, user: dict = Depends(get_curre
             }
         }
 
-        # Attach dynamic transfer split if vendor has set up direct payments
-        if vendor_account_id:
+        # Attach dynamic transfer split ONLY if vendor has a valid 18-character Razorpay Account ID (e.g. acc_1234567890abcd)
+        if vendor_account_id and len(str(vendor_account_id).strip()) == 18 and str(vendor_account_id).strip().startswith("acc_"):
             platform_fee_paise = int(total_paise * 0.05)       # 5% Platform Fee
             vendor_payout_paise = total_paise - platform_fee_paise # 95% Direct to Vendor A/C
 
             order_data["transfers"] = [
                 {
-                    "account": vendor_account_id,
+                    "account": str(vendor_account_id).strip(),
                     "amount": vendor_payout_paise,
                     "currency": "INR",
-                    "on_hold": 0, # 0 = Instant settlement directly to vendor's bank
+                    "on_hold": 0,
                     "notes": {
                         "item_name": req.item_name,
                         "student_name": user["full_name"]
