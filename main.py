@@ -505,6 +505,25 @@ def seed_database():
                     try: conn.execute(text("ALTER TABLE mess_listings ADD COLUMN owner_id VARCHAR DEFAULT NULL;"))
                     except Exception: pass
 
+            if "bookings" in tables:
+                cols = [c["name"] for c in inspector.get_columns("bookings")]
+                for col_def in [
+                    ("target_id",       "VARCHAR DEFAULT NULL"),
+                    ("expiry_date",     "VARCHAR DEFAULT NULL"),
+                    ("special_requests","TEXT DEFAULT ''"),
+                    ("monthly_amount",  "INTEGER DEFAULT 0"),
+                    ("payment_method",  "VARCHAR DEFAULT 'Razorpay'"),
+                    ("transaction_id",  "VARCHAR DEFAULT ''"),
+                    ("status",          "VARCHAR DEFAULT 'Active'"),
+                    ("user_phone",      "VARCHAR DEFAULT ''"),
+                    ("item_name",       "VARCHAR DEFAULT ''"),
+                    ("target_type",     "VARCHAR DEFAULT ''"),
+                    ("move_in_date",    "VARCHAR DEFAULT ''"),
+                ]:
+                    if col_def[0] not in cols:
+                        try: conn.execute(text(f"ALTER TABLE bookings ADD COLUMN {col_def[0]} {col_def[1]};"))
+                        except Exception: pass
+
             conn.commit()
 
         db = SessionLocal()
