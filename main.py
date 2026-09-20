@@ -466,13 +466,13 @@ def seed_database():
                     conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN tenant_phone VARCHAR DEFAULT NULL;"))
                 if "tenant_address" not in pg_cols:
                     conn.execute(text("ALTER TABLE pg_rooms ADD COLUMN tenant_address VARCHAR DEFAULT NULL;"))
-                    
+
             if "users" in tables:
                 cols = [c["name"] for c in inspector.get_columns("users")]
                 if "settlement_tenure" not in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN settlement_tenure VARCHAR DEFAULT 'instant';"))
                 if "auto_settle" not in cols:
-                    conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT 1;"))
+                    conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT TRUE;"))
                 if "password_hash" not in cols and "password" in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR DEFAULT '';"))
                     conn.execute(text("UPDATE users SET password_hash = password WHERE password_hash = '';"))
@@ -2670,3 +2670,6 @@ def reset_entire_database(user: dict = Depends(require_admin), db: Session = Dep
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to reset database: {str(e)}")
+
+
+    
