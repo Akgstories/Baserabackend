@@ -394,11 +394,13 @@ class DBPaymentReceipt(Base):
     payer_phone: Mapped[str] = mapped_column(String, nullable=False)
     vendor_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
     vendor_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    total_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    # 'amount' = original Supabase column (total paid). Keep to avoid NOT NULL violation.
+    amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     platform_fee: Mapped[float] = mapped_column(Float, default=0.0)
-    vendor_payout_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    vendor_payout_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     payment_method: Mapped[str] = mapped_column(String, default="Razorpay")
-    description: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
     route_transfer_status: Mapped[str] = mapped_column(String, default="Settled")
     route_transfer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     tenure_days: Mapped[int] = mapped_column(Integer, default=0)
@@ -483,15 +485,35 @@ def seed_database():
 
             if "payment_receipts" in tables:
                 cols = [c["name"] for c in inspector.get_columns("payment_receipts")]
-                if "route_transfer_id" not in cols:
-                    try: conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN route_transfer_id VARCHAR DEFAULT NULL;"))
-                    except Exception: pass
-                if "tenure_days" not in cols:
-                    try: conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN tenure_days INTEGER DEFAULT 0;"))
-                    except Exception: pass
-                if "settlement_due_date" not in cols:
-                    try: conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN settlement_due_date VARCHAR DEFAULT NULL;"))
-                    except Exception: pass
+                # Add all new columns that may be missing in older Supabase schema
+                for col_def in [
+                    ("total_amount",          "FLOAT DEFAULT 0"),
+                    ("vendor_payout_amount",  "FLOAT DEFAULT 0"),
+                    ("platform_fee",          "FLOAT DEFAULT 0"),
+                    ("vendor_id",             "VARCHAR DEFAULT NULL"),
+                    ("vendor_account_id",     "VARCHAR DEFAULT NULL"),
+                    ("payer_id",              "VARCHAR DEFAULT NULL"),
+                    ("booking_id",            "VARCHAR DEFAULT NULL"),
+                    ("description",           "VARCHAR DEFAULT ''"),
+                    ("route_transfer_status", "VARCHAR DEFAULT 'Settled'"),
+                    ("route_transfer_id",     "VARCHAR DEFAULT NULL"),
+                    ("tenure_days",           "INTEGER DEFAULT 0"),
+                    ("settlement_due_date",   "VARCHAR DEFAULT NULL"),
+                    ("payment_date",          "VARCHAR DEFAULT ''"),
+                    ("payment_method",        "VARCHAR DEFAULT 'Razorpay'"),
+                    ("payer_name",            "VARCHAR DEFAULT ''"),
+                    ("payer_phone",           "VARCHAR DEFAULT ''"),
+                    ("order_id",              "VARCHAR DEFAULT ''"),
+                ]:
+                    if col_def[0] not in cols:
+                        try: conn.execute(text(f"ALTER TABLE payment_receipts ADD COLUMN {col_def[0]} {col_def[1]};"))
+                        except Exception: pass
+                # Make original 'amount' column nullable (was NOT NULL, now we use total_amount too)
+                try: conn.execute(text("ALTER TABLE payment_receipts ALTER COLUMN amount DROP NOT NULL;"))
+                except Exception: pass
+                # Make description nullable in case old rows have it empty
+                try: conn.execute(text("ALTER TABLE payment_receipts ALTER COLUMN description DROP NOT NULL;"))
+                except Exception: pass
 
             if "pg_listings" in tables:
                 cols = [c["name"] for c in inspector.get_columns("pg_listings")]
@@ -1582,6 +1604,7 @@ def verify_payment_and_fulfill(
         payer_phone=user["phone"] or user["email"],
         vendor_id=vendor_user.id if vendor_user else None,
         vendor_account_id=vendor_user.razorpay_account_id if vendor_user else None,
+        amount=total_amt,           # original Supabase column (NOT NULL)
         total_amount=total_amt,
         platform_fee=platform_fee,
         vendor_payout_amount=vendor_payout,
