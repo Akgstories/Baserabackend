@@ -650,7 +650,7 @@ class CreateMessListingRequest(BaseModel):
     description: str
 
 class CreateOrderRequest(BaseModel):
-    amount: int
+    amount: float  # Change int to float
     item_name: str
 
 class VerifyPaymentRequest(BaseModel):
