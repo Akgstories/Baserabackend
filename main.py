@@ -252,21 +252,21 @@ class DBUser(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
     full_name: Mapped[str] = mapped_column(String, nullable=False)
     email: Mapped[str] = mapped_column(String, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String, nullable=False) # Stores salted hash securely in the existing 'password' column
+    password: Mapped[str] = mapped_column(String, nullable=False) # Stores salted hash securely in the existing 'password' column
     phone: Mapped[str] = mapped_column(String, default="")
     address: Mapped[str] = mapped_column(String, default="GEC Bokaro Hostel, Room 101")
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=GEC+Bokaro")
     role: Mapped[str] = mapped_column(String, default="student")
     token: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    razorpay_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    bank_account_no: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    bank_ifsc: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    account_holder_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    pan_number: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    settlement_tenure: Mapped[str] = mapped_column(String, default="instant")
-    auto_settle: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    razorpay_account_id: Mapped[str] = mapped_column(String, default="", server_default="")
+    bank_account_no: Mapped[str] = mapped_column(String, default="", server_default="")
+    bank_ifsc: Mapped[str] = mapped_column(String, default="", server_default="")
+    account_holder_name: Mapped[str] = mapped_column(String, default="", server_default="")
+    pan_number: Mapped[str] = mapped_column(String, default="", server_default="")
+    settlement_tenure: Mapped[str] = mapped_column(String, default="instant", server_default="instant")
+    auto_settle: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default="now()")
 
 class DBPGListing(Base):
     __tablename__ = "pg_listings"
@@ -472,29 +472,6 @@ def seed_database():
                 if "settlement_due_date" not in cols:
                     try: conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN settlement_due_date VARCHAR DEFAULT NULL;"))
                     except Exception: pass
-
-            if "mess_students" in tables:
-                ms_cols = [c["name"] for c in inspector.get_columns("mess_students")]
-                if "user_id" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN user_id VARCHAR DEFAULT NULL;"))
-                if "google_map_url" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN google_map_url TEXT DEFAULT 'https://maps.google.com/?q=GEC+Bokaro+Hostel';"))
-                if "mess_id" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_id VARCHAR DEFAULT NULL;"))
-                if "mess_name" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_name VARCHAR DEFAULT 'Annapurna Homely Mess';"))
-                if "plan" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN plan VARCHAR DEFAULT '3-Time Standard Daily Plan';"))
-                if "diet" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN diet VARCHAR DEFAULT 'Veg';"))
-                if "base_price" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN base_price INTEGER DEFAULT 3000;"))
-                if "is_active" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN is_active BOOLEAN DEFAULT FALSE;"))
-                if "start_date" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN start_date VARCHAR DEFAULT NULL;"))
-                if "expiry_date" not in ms_cols:
-                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN expiry_date VARCHAR DEFAULT NULL;"))
 
             if "pg_listings" in tables:
                 cols = [c["name"] for c in inspector.get_columns("pg_listings")]
@@ -2684,5 +2661,3 @@ def reset_entire_database(user: dict = Depends(require_admin), db: Session = Dep
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to reset database: {str(e)}")
-
-      
