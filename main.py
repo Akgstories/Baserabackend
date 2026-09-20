@@ -947,7 +947,7 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
         id=user_id,
         full_name=req.full_name.strip(),
         email=req.email.lower().strip(),
-        password_hash=pass_hash,
+        password=pass_hash,
         phone=clean_phone,
         address=req.address or "GEC Bokaro Hostel",
         google_map_url=map_url,
@@ -1002,7 +1002,7 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
 def login_user(req: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(DBUser).filter(DBUser.email == req.email.lower().strip()).first()
     
-    if not user or not verify_password(req.password, user.password_hash):
+    if not user or not verify_password(req.password, user.password):
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password credentials. Please verify your details."
@@ -1068,7 +1068,7 @@ def forgot_password(req: ForgotPasswordRequest, background_tasks: BackgroundTask
     if not user:
         raise HTTPException(status_code=404, detail="No registered account found matching this email and phone number.")
     
-    user.password_hash = hash_password(req.new_password)
+    user.password = hash_password(req.new_password)
     db.commit()
 
     background_tasks.add_task(
