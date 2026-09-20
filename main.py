@@ -708,6 +708,10 @@ class CreatePGRequest(BaseModel):
     rating: str = "4.5"
     amenities: str = "Wi-Fi, RO Water, Security"
 
+class UnsubscribeRequest(BaseModel):
+    booking_id: Optional[str] = None
+    item_name: Optional[str] = None
+
 
 
 def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
@@ -1369,63 +1373,80 @@ def get_mess_daily_stats(
     }
 @app.post("/api/mess/unsubscribe")
 def unsubscribe_mess(
+    req: UnsubscribeRequest,
     background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # 1. Update Mess Student record to inactive
+    target_booking = None
+
+    # 1. Target the specific booking by booking_id
+    if req.booking_id:
+        target_booking = db.query(DBBooking).filter(
+            DBBooking.id == req.booking_id,
+            or_(DBBooking.user_phone == user["phone"], DBBooking.user_phone == user["email"])
+        ).first()
+
+    # Fallback search by item name if booking_id isn't provided
+    if not target_booking and req.item_name:
+        target_booking = db.query(DBBooking).filter(
+            or_(DBBooking.user_phone == user["phone"], DBBooking.user_phone == user["email"]),
+            DBBooking.target_type == "Mess Subscription",
+            DBBooking.item_name.ilike(f"%{req.item_name}%"),
+            DBBooking.status == "Active"
+        ).first()
+
+    if not target_booking:
+        raise HTTPException(status_code=404, detail="Active booking record not found for this specific mess.")
+
+    # Mark ONLY this specific booking as Unsubscribed
+    target_booking.status = "Unsubscribed"
+
+    # 2. Extract provider/mess details from item_name
+    mess_title = target_booking.item_name
     mess_student = db.query(DBMessStudent).filter(
-        DBMessStudent.name.ilike(user["full_name"])
+        DBMessStudent.name.ilike(user["full_name"]),
+        DBMessStudent.mess_name.ilike(f"%{mess_title.split('-')[0].strip()}%")
     ).first()
 
     if mess_student:
         mess_student.is_active = False
         mess_student.plan = "Unsubscribed"
 
-    # 2. Update active Mess Bookings status for this student
-    active_mess_bookings = db.query(DBBooking).filter(
-        or_(DBBooking.user_phone == user["phone"], DBBooking.user_phone == user["email"]),
-        DBBooking.target_type == "Mess Subscription",
-        DBBooking.status == "Active"
-    ).all()
+    # 3. Route notification exclusively to THIS specific mess owner
+    mess_listing = db.query(DBMessListing).filter(
+        DBMessListing.name.ilike(f"%{mess_title.split('-')[0].strip()}%")
+    ).first()
 
-    for b in active_mess_bookings:
-        b.status = "Unsubscribed"
-
-    # 3. Notify Mess Owner if subscribed
-    if mess_student and mess_student.mess_name:
-        mess_listing = db.query(DBMessListing).filter(
-            DBMessListing.name.ilike(f"%{mess_student.mess_name}%")
+    if mess_listing:
+        target_owner = db.query(DBUser).filter(
+            DBUser.role == "mess_partner",
+            DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")
         ).first()
-        if mess_listing:
-            target_owner = db.query(DBUser).filter(
-                DBUser.role == "mess_partner",
-                DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")
-            ).first()
 
-            if target_owner:
-                notify_owner_and_email(
-                    db=db,
-                    background_tasks=background_tasks,
-                    recipient_role="mess_partner",
-                    recipient_user_id=target_owner.id,
-                    title="Student Unsubscribed Mess Plan",
-                    message=f"Student '{user['full_name']}' ({user['phone']}) has unsubscribed from their mess plan.",
-                    event_type="mess_unsubscribe",
-                    include_admin=False
-                )
+        if target_owner:
+            notify_owner_and_email(
+                db=db,
+                background_tasks=background_tasks,
+                recipient_role="mess_partner",
+                recipient_user_id=target_owner.id,
+                title="Student Unsubscribed Mess Plan",
+                message=f"Student '{user['full_name']}' ({user['phone']}) unsubscribed from '{mess_title}'.",
+                event_type="mess_unsubscribe",
+                include_admin=False
+            )
 
     db.commit()
 
-    # 4. Confirmation email to student
+    # Email notification to student
     background_tasks.add_task(
         send_email_notification,
         user["email"],
         "Mess Subscription Cancelled",
-        f"Hi {user['full_name']},\n\nYour mess subscription has been unsubscribed successfully."
+        f"Hi {user['full_name']},\n\nYour subscription for '{mess_title}' has been successfully unsubscribed."
     )
 
-    return {"status": "success", "message": "Successfully unsubscribed from mess plan!"}
+    return {"status": "success", "message": f"Successfully unsubscribed from {mess_title}!"}
 
 @app.get("/api/mess/owner-monthly-billing")
 def get_owner_monthly_billing(
@@ -2059,6 +2080,60 @@ def delete_admin_pg_listing(pg_id: str, user: dict = Depends(get_current_user), 
     db.delete(pg)
     db.commit()
     return {"status": "success", "message": "PG Listing deleted successfully!"}
+
+
+@app.get("/api/vendor/dashboard-summary")
+def get_vendor_dashboard_summary(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user["role"] not in ["mess_partner", "pg_owner", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized access.")
+
+    txns = []
+    active_students = 0
+
+    # 1. Mess Partners Isolation
+    if user["role"] == "mess_partner":
+        my_messes = db.query(DBMessListing).filter(DBMessListing.provider_name.ilike(f"%{user['full_name']}%")).all()
+        my_mess_names = [m.name for m in my_messes]
+
+        if my_mess_names:
+            txns = db.query(DBPaymentReceipt).filter(
+                or_(*[DBPaymentReceipt.description.ilike(f"%{name}%") for name in my_mess_names])
+            ).all()
+
+            active_students = db.query(DBMessStudent).filter(
+                DBMessStudent.is_active == True,
+                or_(*[DBMessStudent.mess_name.ilike(f"%{name}%") for name in my_mess_names])
+            ).count()
+
+    # 2. PG Owners Isolation
+    elif user["role"] == "pg_owner":
+        my_pgs = db.query(DBPGListing).filter(DBPGListing.owner_id == user["id"]).all()
+        my_pg_names = [p.name for p in my_pgs]
+
+        if my_pg_names:
+            txns = db.query(DBPaymentReceipt).filter(
+                or_(*[DBPaymentReceipt.description.ilike(f"%{name}%") for name in my_pg_names])
+            ).all()
+
+            active_students = db.query(DBBooking).filter(
+                DBBooking.target_type == "PG Room",
+                DBBooking.status == "Active",
+                or_(*[DBBooking.item_name.ilike(f"%{name}%") for name in my_pg_names])
+            ).count()
+
+    # 3. Admin View
+    else:
+        txns = db.query(DBPaymentReceipt).all()
+        active_students = db.query(DBBooking).filter(DBBooking.status == "Active").count()
+
+    total_earnings = sum(t.vendor_payout_amount if t.vendor_payout_amount > 0 else (t.total_amount * 0.95) for t in txns)
+
+    return {
+        "status": "success",
+        "total_earnings": round(total_earnings, 2),
+        "total_transactions": len(txns),
+        "active_subscribers": active_students
+    }
 
 @app.get("/api/vendor/monthly-credits")
 async def get_vendor_monthly_credits(month: str = "2026-09", current_user: dict = Depends(get_current_user)):
