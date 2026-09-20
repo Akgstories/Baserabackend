@@ -359,6 +359,7 @@ class DBComplaint(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
     user_name: Mapped[str] = mapped_column(String, nullable=False)
     user_phone: Mapped[str] = mapped_column(String, nullable=False)
+    target_owner_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True) # <-- ADD THIS
     category: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -413,6 +414,10 @@ def seed_database():
                 if "mess_name" not in cols:
                     conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_name TEXT DEFAULT 'Annapurna Homely Mess';"))
 
+            if "complaints" in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns("complaints")]
+                if "target_owner_id" not in cols:
+                    conn.execute(text("ALTER TABLE complaints ADD COLUMN target_owner_id TEXT DEFAULT NULL;"))
             conn.commit()
 
         db = SessionLocal()
@@ -648,6 +653,7 @@ class CreateMessListingRequest(BaseModel):
     address: str
     google_map_url: str
     description: str
+
 
 class CreateOrderRequest(BaseModel):
     amount: float  # Change int to float
@@ -1578,6 +1584,7 @@ def update_room_images(req: UpdateRoomImagesRequest, user: dict = Depends(get_cu
 @app.get("/api/complaints")
 def get_complaints(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     role = user["role"]
+    
     if role == "student":
         comps = db.query(DBComplaint).filter(
             or_(
@@ -1586,28 +1593,106 @@ def get_complaints(user: dict = Depends(get_current_user), db: Session = Depends
             )
         ).all()
     elif role == "pg_owner":
-        comps = db.query(DBComplaint).filter(DBComplaint.category == "PG Maintenance").all()
+        # Shows PG Maintenance complaints assigned to this specific PG owner or unassigned ones
+        comps = db.query(DBComplaint).filter(
+            DBComplaint.category == "PG Maintenance",
+            or_(
+                DBComplaint.target_owner_id == user["id"],
+                DBComplaint.target_owner_id == None
+            )
+        ).all()
     elif role == "mess_partner":
-        comps = db.query(DBComplaint).filter(DBComplaint.category == "Mess Quality").all()
+        # Shows Mess Quality complaints assigned to this specific Mess owner or unassigned ones
+        comps = db.query(DBComplaint).filter(
+            DBComplaint.category == "Mess Quality",
+            or_(
+                DBComplaint.target_owner_id == user["id"],
+                DBComplaint.target_owner_id == None
+            )
+        ).all()
     else:
+        # Admin sees all complaints
         comps = db.query(DBComplaint).all()
 
+    # ALWAYS return a list, never raise 404
     if not comps:
         return []
 
-    return [{"id": c.id, "user_name": c.user_name, "user_phone": c.user_phone, "category": c.category, "title": c.title, "description": c.description, "status": c.status, "created_at": c.created_at} for c in comps]
-
+    return [
+        {
+            "id": c.id, 
+            "user_name": c.user_name, 
+            "user_phone": c.user_phone, 
+            "category": c.category, 
+            "title": c.title, 
+            "description": c.description, 
+            "status": c.status, 
+            "created_at": c.created_at
+        } for c in comps
+    ]
+@app.post("/api/complaints/create")
 @app.post("/api/complaints")
 def raise_complaint(req: ComplaintCreateRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     cmp_id = f"cmp-{uuid.uuid4().hex[:6]}"
-    db.add(DBComplaint(id=cmp_id, user_name=user["full_name"], user_phone=user["phone"] or user["email"], category=req.category, title=req.title, description=req.description, status="Pending"))
+    target_owner_id = None
+    target_owner_user = None
 
-    target_role = "pg_owner" if req.category == "PG Maintenance" else "mess_partner"
+    if req.category == "Mess Quality":
+        # Find student's active Mess Subscription
+        mess_sub = db.query(DBMessStudent).filter(
+            DBMessStudent.name.ilike(user["full_name"]),
+            DBMessStudent.is_active == True
+        ).first()
 
+        if mess_sub and mess_sub.mess_name:
+            mess_listing = db.query(DBMessListing).filter(
+                DBMessListing.name.ilike(f"%{mess_sub.mess_name}%")
+            ).first()
+            if mess_listing:
+                target_owner_user = db.query(DBUser).filter(
+                    DBUser.role == "mess_partner",
+                    DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")
+                ).first()
+
+    elif req.category == "PG Maintenance":
+        # Find student's active PG Booking
+        pg_booking = db.query(DBBooking).filter(
+            or_(DBBooking.user_phone == user["phone"], DBBooking.user_phone == user["email"]),
+            DBBooking.target_type == "PG Room",
+            DBBooking.status == "Active"
+        ).first()
+
+        if pg_booking:
+            pg_listing = db.query(DBPGListing).filter(
+                DBPGListing.name.ilike(f"%{pg_booking.item_name}%")
+            ).first()
+            if pg_listing and pg_listing.owner_id:
+                target_owner_user = db.query(DBUser).filter(DBUser.id == pg_listing.owner_id).first()
+
+    if target_owner_user:
+        target_owner_id = target_owner_user.id
+
+    # Create the complaint entry with target_owner_id
+    new_complaint = DBComplaint(
+        id=cmp_id,
+        user_name=user["full_name"],
+        user_phone=user["phone"] or user["email"],
+        target_owner_id=target_owner_id,
+        category=req.category,
+        title=req.title,
+        description=req.description,
+        status="Pending"
+    )
+    db.add(new_complaint)
+
+    target_role = "mess_partner" if req.category == "Mess Quality" else "pg_owner"
+
+    # Send Notification to the specific owner
     notify_owner_and_email(
         db=db,
         background_tasks=background_tasks,
         recipient_role=target_role,
+        recipient_user_id=target_owner_id,
         title=f"New Complaint Raised ({req.category})",
         message=f"Student '{user['full_name']}' ({user['phone']}) raised a complaint.\nTitle: {req.title}\nDetails: {req.description}",
         event_type="complaint",
@@ -1616,15 +1701,15 @@ def raise_complaint(req: ComplaintCreateRequest, background_tasks: BackgroundTas
 
     db.commit()
 
+    # Confirmation email to the student
     background_tasks.add_task(
         send_email_notification,
         user["email"],
         f"Complaint Logged Ticket #{cmp_id}: {req.title}",
-        f"Hi {user['full_name']},\n\nWe received your complaint regarding '{req.title}'. The respective {target_role.replace('_', ' ').title()} has been notified to resolve this."
+        f"Hi {user['full_name']},\n\nWe received your complaint regarding '{req.title}'. The respective {target_role.replace('_', ' ').title()} has been notified directly."
     )
 
-    return {"status": "success", "message": "Complaint logged successfully!"}
-
+    return {"status": "success", "message": "Complaint logged successfully and routed to your provider!"}
 @app.post("/api/complaints/resolve")
 def resolve_complaint(req: ResolveComplaintRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     comp = db.query(DBComplaint).filter(DBComplaint.id == req.complaint_id).first()
