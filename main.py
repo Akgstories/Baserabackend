@@ -473,6 +473,29 @@ def seed_database():
                     try: conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN settlement_due_date VARCHAR DEFAULT NULL;"))
                     except Exception: pass
 
+            if "mess_students" in tables:
+                ms_cols = [c["name"] for c in inspector.get_columns("mess_students")]
+                if "user_id" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN user_id VARCHAR DEFAULT NULL;"))
+                if "google_map_url" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN google_map_url TEXT DEFAULT 'https://maps.google.com/?q=GEC+Bokaro+Hostel';"))
+                if "mess_id" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_id VARCHAR DEFAULT NULL;"))
+                if "mess_name" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN mess_name VARCHAR DEFAULT 'Annapurna Homely Mess';"))
+                if "plan" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN plan VARCHAR DEFAULT '3-Time Standard Daily Plan';"))
+                if "diet" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN diet VARCHAR DEFAULT 'Veg';"))
+                if "base_price" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN base_price INTEGER DEFAULT 3000;"))
+                if "is_active" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN is_active BOOLEAN DEFAULT FALSE;"))
+                if "start_date" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN start_date VARCHAR DEFAULT NULL;"))
+                if "expiry_date" not in ms_cols:
+                    conn.execute(text("ALTER TABLE mess_students ADD COLUMN expiry_date VARCHAR DEFAULT NULL;"))
+
             if "pg_listings" in tables:
                 cols = [c["name"] for c in inspector.get_columns("pg_listings")]
                 if "owner_id" not in cols:
@@ -2661,3 +2684,5 @@ def reset_entire_database(user: dict = Depends(require_admin), db: Session = Dep
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to reset database: {str(e)}")
+
+      
