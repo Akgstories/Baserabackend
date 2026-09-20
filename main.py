@@ -1367,6 +1367,65 @@ def get_mess_daily_stats(
             for s in active_students
         ]
     }
+@app.post("/api/mess/unsubscribe")
+def unsubscribe_mess(
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # 1. Update Mess Student record to inactive
+    mess_student = db.query(DBMessStudent).filter(
+        DBMessStudent.name.ilike(user["full_name"])
+    ).first()
+
+    if mess_student:
+        mess_student.is_active = False
+        mess_student.plan = "Unsubscribed"
+
+    # 2. Update active Mess Bookings status for this student
+    active_mess_bookings = db.query(DBBooking).filter(
+        or_(DBBooking.user_phone == user["phone"], DBBooking.user_phone == user["email"]),
+        DBBooking.target_type == "Mess Subscription",
+        DBBooking.status == "Active"
+    ).all()
+
+    for b in active_mess_bookings:
+        b.status = "Unsubscribed"
+
+    # 3. Notify Mess Owner if subscribed
+    if mess_student and mess_student.mess_name:
+        mess_listing = db.query(DBMessListing).filter(
+            DBMessListing.name.ilike(f"%{mess_student.mess_name}%")
+        ).first()
+        if mess_listing:
+            target_owner = db.query(DBUser).filter(
+                DBUser.role == "mess_partner",
+                DBUser.full_name.ilike(f"%{mess_listing.provider_name}%")
+            ).first()
+
+            if target_owner:
+                notify_owner_and_email(
+                    db=db,
+                    background_tasks=background_tasks,
+                    recipient_role="mess_partner",
+                    recipient_user_id=target_owner.id,
+                    title="Student Unsubscribed Mess Plan",
+                    message=f"Student '{user['full_name']}' ({user['phone']}) has unsubscribed from their mess plan.",
+                    event_type="mess_unsubscribe",
+                    include_admin=False
+                )
+
+    db.commit()
+
+    # 4. Confirmation email to student
+    background_tasks.add_task(
+        send_email_notification,
+        user["email"],
+        "Mess Subscription Cancelled",
+        f"Hi {user['full_name']},\n\nYour mess subscription has been unsubscribed successfully."
+    )
+
+    return {"status": "success", "message": "Successfully unsubscribed from mess plan!"}
 
 @app.get("/api/mess/owner-monthly-billing")
 def get_owner_monthly_billing(
