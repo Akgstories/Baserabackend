@@ -1028,26 +1028,8 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
     token = create_jwt_token({"user_id": new_user.id, "email": new_user.email, "role": new_user.role})
     new_user.token = token
     
-    # --- CRITICAL FIX: Add and commit DBUser FIRST ---
     db.add(new_user)
     db.commit()
-
-    # --- Now add DBMessStudent after the user row exists in 'users' ---
-    if role == "student":
-        db.add(DBMessStudent(
-            id=f"ms-{uuid.uuid4().hex[:6]}",
-            user_id=new_user.id,
-            name=new_user.full_name,
-            phone=clean_phone,
-            address=new_user.address,
-            google_map_url=map_url,
-            mess_name="Annapurna Homely Mess",
-            plan="3-Time Standard Daily Plan",
-            diet="Veg",
-            base_price=3000,
-            is_active=False
-        ))
-        db.commit()
 
     background_tasks.add_task(
         send_email_notification,
