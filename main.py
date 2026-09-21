@@ -929,15 +929,6 @@ class WeeklyMenuUpdateRequest(BaseModel):
     lunch: str
     dinner: str
 
-class CreateMessListingRequest(BaseModel):
-    name: str
-    provider_name: Optional[str] = None
-    monthly_price: int
-    diet_type: str = "Veg & Non-Veg"
-    meals_per_day: str = "Flexible Plan Options"
-    address: str
-    google_map_url: str
-    description: str
 
 class CreateOrderRequest(BaseModel):
     amount: float
