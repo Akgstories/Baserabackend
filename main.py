@@ -12,6 +12,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
+from sqlalchemy import func
 
 from PIL import Image
 from fastapi import FastAPI, HTTPException, Header, Depends, Query, BackgroundTasks, Request, status
@@ -461,6 +462,22 @@ class DBNotification(Base):
     event_type: Mapped[str] = mapped_column(String, default="general")
     created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
+class DBMessPricingRuleSchema(BaseModel):
+    mess_id: str
+    location_name: str
+    breakfast_rate: float
+    lunch_rate: float
+    dinner_rate: float
+
+class DBMessPricingRule(Base):
+    __tablename__ = "mess_pricing_rules"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    mess_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    location_name: Mapped[str] = mapped_column(String, nullable=False)
+    breakfast_rate: Mapped[float] = mapped_column(Float, default=30.0)
+    lunch_rate: Mapped[float] = mapped_column(Float, default=40.0)
+    dinner_rate: Mapped[float] = mapped_column(Float, default=40.0)
 
 # ─── DATABASE MIGRATIONS & SEEDING ──────────────────────────────────
 def seed_database():
@@ -1302,17 +1319,6 @@ def delete_mess_listing(mess_id: str, user: dict = Depends(require_admin), db: S
     db.commit()
     return {"status": "success", "message": f"Mess listing '{mess.name}' deleted successfully."}
 
-@app.post("/api/mess/update-price")
-def update_mess_price(req: UpdateMessPriceRequest, user: dict = Depends(require_vendor_or_admin), db: Session = Depends(get_db)):
-    mess = db.query(DBMessListing).filter(DBMessListing.id == req.mess_id).first()
-    if not mess:
-        mess = db.query(DBMessListing).filter(DBMessListing.name.ilike(f"%{req.mess_id}%")).first()
-    if not mess:
-        raise HTTPException(status_code=404, detail="Mess listing not found.")
-    
-    mess.monthly_price = req.monthly_price
-    db.commit()
-    return {"status": "success", "message": f"Updated monthly price for '{mess.name}' to ₹{req.monthly_price} in database!"}
 
 
 # ─── PG LISTINGS & ROOM MANAGEMENT ENDPOINTS ───────────────────────
@@ -2825,4 +2831,40 @@ def reset_entire_database(user: dict = Depends(require_admin), db: Session = Dep
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to reset database: {str(e)}")
 
+
+@app.post("/api/mess/pricing/update")
+def update_mess_location_pricing(
+    req: DBMessPricingRuleSchema,
+    user: dict = Depends(require_vendor_or_admin),
+    db: Session = Depends(get_db)
+):
+    mess = db.query(DBMessListing).filter(DBMessListing.id == req.mess_id).first()
+    
+    # Permission check: Ensure mess belongs to logged-in vendor (unless admin)
+    if mess and mess.owner_id and user.get("role") != "admin":
+        if mess.owner_id != user.get("id"):
+            raise HTTPException(status_code=403, detail="Unauthorized: You can only edit pricing for your own mess listings.")
+
+    existing_rule = db.query(DBMessPricingRule).filter(
+        DBMessPricingRule.mess_id == req.mess_id,
+        func.lower(DBMessPricingRule.location_name) == req.location_name.strip().lower()
+    ).first()
+
+    if existing_rule:
+        existing_rule.breakfast_rate = req.breakfast_rate
+        existing_rule.lunch_rate = req.lunch_rate
+        existing_rule.dinner_rate = req.dinner_rate
+    else:
+        new_rule = DBMessPricingRule(
+            id=f"mpr-{uuid.uuid4().hex[:8]}",
+            mess_id=req.mess_id,
+            location_name=req.location_name.strip(),
+            breakfast_rate=req.breakfast_rate,
+            lunch_rate=req.lunch_rate,
+            dinner_rate=req.dinner_rate
+        )
+        db.add(new_rule)
+
+    db.commit()
+    return {"status": "success", "message": f"Rates updated successfully for {req.location_name}!"}
 
