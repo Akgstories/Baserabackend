@@ -304,12 +304,19 @@ class DBMessListing(Base):
 
 class DBMessPricing(Base):
     __tablename__ = "mess_pricing"
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
     mess_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     location_name: Mapped[str] = mapped_column(String, nullable=False)
+    
+    # New Granular Meal Rates
     breakfast_rate: Mapped[int] = mapped_column(Integer, default=30)
     lunch_rate: Mapped[int] = mapped_column(Integer, default=40)
     dinner_rate: Mapped[int] = mapped_column(Integer, default=40)
+    
+    # Legacy Fields (Added so existing backend functions don't crash)
+    three_time_rate: Mapped[int] = mapped_column(Integer, default=100)
+    two_time_rate: Mapped[int] = mapped_column(Integer, default=80)
 
 class DBPGRoom(Base):
     __tablename__ = "pg_rooms"
@@ -978,6 +985,16 @@ class ApproveSettlementRequest(BaseModel):
     settlement_id: str
     action: str = "approve"
 
+class AddMessRequest(BaseModel):
+    name: str
+    provider_name: Optional[str] = None
+    monthly_price: int
+    diet_type: str = "Veg & Non-Veg"
+    meals_per_day: str = "Flexible Plan Options"
+    address: str
+    google_map_url: str
+    description: str
+
 
 # ─── API ENDPOINTS ─────────────────────────────────────────────────
 
@@ -1203,37 +1220,40 @@ def get_mess_listings(db: Session = Depends(get_db)):
         }
         for m in listings
     ]
-
 @app.post("/api/mess/add-listing")
-def create_mess_listing(
-    req: CreateMessListingRequest,
-    user: dict = Depends(require_vendor_or_admin),
-    db: Session = Depends(get_db)
-):
-    mess_id = f"mess-{uuid.uuid4().hex[:6]}"
+def add_mess_listing(req: AddMessRequest, user: dict = Depends(require_vendor_or_admin), db: Session = Depends(get_db)):
+    mess_id = f"mess-{int(datetime.now().timestamp())}"
+    
     new_mess = DBMessListing(
         id=mess_id,
-        owner_id=user["id"],
-        name=req.name.strip(),
-        provider_name=req.provider_name or user["full_name"],
+        name=req.name,
+        provider_name=req.provider_name,
         monthly_price=req.monthly_price,
         diet_type=req.diet_type,
         meals_per_day=req.meals_per_day,
-        rating="5.0 (New)",
         address=req.address,
         google_map_url=req.google_map_url,
-        description=req.description
+        description=req.description,
+        user_id=user["id"]
     )
     db.add(new_mess)
 
-    db.add_all([
-        DBMessPricing(mess_id=mess_id, location_name="GEC Main Gate", three_time_rate=int(req.monthly_price / 30), two_time_rate=int(req.monthly_price / 30 * 0.8)),
-        DBMessPricing(mess_id=mess_id, location_name="Chandankiyari", three_time_rate=int(req.monthly_price / 30 * 0.95), two_time_rate=int(req.monthly_price / 30 * 0.75)),
-        DBMessPricing(mess_id=mess_id, location_name="Ghoragara", three_time_rate=int(req.monthly_price / 30 * 1.05), two_time_rate=int(req.monthly_price / 30 * 0.85))
-    ])
+    # Automatically add default location pricing
+    default_locations = ["GEC Main Gate", "Chandankiyari", "Ghoragara"]
+    for loc in default_locations:
+        p = DBMessPricing(
+            mess_id=mess_id,
+            location_name=loc,
+            breakfast_rate=30,
+            lunch_rate=40,
+            dinner_rate=40,
+            three_time_rate=100,  # Included for backward compatibility
+            two_time_rate=80
+        )
+        db.add(p)
 
     db.commit()
-    return {"status": "success", "message": f"Mess '{req.name}' listed successfully with dynamic location pricing!", "mess_id": mess_id}
+    return {"status": "success", "message": "Mess listing created successfully!"}
 
 @app.delete("/api/mess-listings/{mess_id}")
 def delete_mess_listing(mess_id: str, user: dict = Depends(require_admin), db: Session = Depends(get_db)):
