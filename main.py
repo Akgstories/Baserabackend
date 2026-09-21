@@ -1010,6 +1010,13 @@ class AddMessRequest(BaseModel):
     google_map_url: str
     description: str
 
+class MessPricingUpdateSchema(BaseModel):
+    mess_id: str
+    location_name: str
+    breakfast_rate: int
+    lunch_rate: int
+    dinner_rate: int
+
 
 
 # ─── API ENDPOINTS ─────────────────────────────────────────────────
@@ -2838,38 +2845,29 @@ def reset_entire_database(user: dict = Depends(require_admin), db: Session = Dep
 
 
 @app.post("/api/mess/pricing/update")
-def update_mess_location_pricing(
-    req: DBMessPricingRuleSchema,
-    user: dict = Depends(require_vendor_or_admin),
-    db: Session = Depends(get_db)
-):
-    mess = db.query(DBMessListing).filter(DBMessListing.id == req.mess_id).first()
-    
-    # Permission check: Ensure mess belongs to logged-in vendor (unless admin)
-    if mess and mess.owner_id and user.get("role") != "admin":
-        if mess.owner_id != user.get("id"):
-            raise HTTPException(status_code=403, detail="Unauthorized: You can only edit pricing for your own mess listings.")
-
-    existing_rule = db.query(DBMessPricingRule).filter(
-        DBMessPricingRule.mess_id == req.mess_id,
-        func.lower(DBMessPricingRule.location_name) == req.location_name.strip().lower()
+def update_mess_pricing(req: MessPricingUpdateSchema, db: Session = Depends(get_db)):
+    # Look for existing pricing entry
+    pricing = db.query(DBMessPricing).filter(
+        DBMessPricing.mess_id == req.mess_id,
+        DBMessPricing.location_name.ilike(req.location_name)
     ).first()
 
-    if existing_rule:
-        existing_rule.breakfast_rate = req.breakfast_rate
-        existing_rule.lunch_rate = req.lunch_rate
-        existing_rule.dinner_rate = req.dinner_rate
+    if pricing:
+        # Update existing rates
+        pricing.breakfast_rate = req.breakfast_rate
+        pricing.lunch_rate = req.lunch_rate
+        pricing.dinner_rate = req.dinner_rate
     else:
-        new_rule = DBMessPricingRule(
-            id=f"mpr-{uuid.uuid4().hex[:8]}",
+        # Insert new location rate record
+        pricing = DBMessPricing(
             mess_id=req.mess_id,
-            location_name=req.location_name.strip(),
+            location_name=req.location_name,
             breakfast_rate=req.breakfast_rate,
             lunch_rate=req.lunch_rate,
             dinner_rate=req.dinner_rate
         )
-        db.add(new_rule)
+        db.add(pricing)
 
     db.commit()
-    return {"status": "success", "message": f"Rates updated successfully for {req.location_name}!"}
+    return {"status": "success", "message": f"Rates for '{req.location_name}' saved successfully!"}
 
