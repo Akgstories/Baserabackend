@@ -255,13 +255,17 @@ class DBUser(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
     full_name: Mapped[str] = mapped_column(String, nullable=False)
     email: Mapped[str] = mapped_column(String, index=True, nullable=False)
-    password: Mapped[str] = mapped_column(String, nullable=False) # Stores salted hash securely in the existing 'password' column
+    password: Mapped[str] = mapped_column(String, nullable=False)
     phone: Mapped[str] = mapped_column(String, default="")
     address: Mapped[str] = mapped_column(String, default="GEC Bokaro Hostel, Room 101")
     google_map_url: Mapped[str] = mapped_column(Text, default="https://maps.google.com/?q=GEC+Bokaro")
     role: Mapped[str] = mapped_column(String, default="student")
     token: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # Vendor Payout & UPI Integration Fields
+    upi_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    razorpay_contact_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
+    razorpay_fund_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     razorpay_account_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     bank_account_no: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     bank_ifsc: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
@@ -474,10 +478,12 @@ def seed_database():
                 if "auto_settle" not in cols:
                     try: conn.execute(text("ALTER TABLE users ADD COLUMN auto_settle BOOLEAN DEFAULT true;"))
                     except Exception: pass
-                # Drop NOT NULL on optional vendor fields so students can register with NULL
-                for _col in ["razorpay_account_id", "bank_account_no", "bank_ifsc", "account_holder_name", "pan_number"]:
-                    try: conn.execute(text(f"ALTER TABLE users ALTER COLUMN {_col} DROP NOT NULL;"))
-                    except Exception: pass
+                
+                    for _col in ["upi_id", "razorpay_contact_id", "razorpay_fund_account_id"]:
+                        if _col not in cols:
+                            try: conn.execute(text(f"ALTER TABLE users ADD COLUMN {_col} VARCHAR DEFAULT NULL;"))
+                            except Exception: pass
+
                 # Drop UNIQUE constraints on those vendor columns (NULL is fine for multiple rows)
                 try:
                     conn.execute(text("""
@@ -976,9 +982,10 @@ class UnsubscribeRequest(BaseModel):
 
 class VendorRouteOnboardRequest(BaseModel):
     account_holder_name: str
-    bank_account_no: str
-    bank_ifsc: str
-    pan_number: str
+    upi_id: str
+    bank_account_no: Optional[str] = ""
+    bank_ifsc: Optional[str] = ""
+    pan_number: Optional[str] = ""
     settlement_tenure: Optional[str] = "instant"
 
 class ApproveSettlementRequest(BaseModel):
@@ -994,6 +1001,7 @@ class AddMessRequest(BaseModel):
     address: str
     google_map_url: str
     description: str
+
 
 
 # ─── API ENDPOINTS ─────────────────────────────────────────────────
@@ -1449,64 +1457,68 @@ def onboard_vendor_razorpay_route(
     user: dict = Depends(require_vendor_or_admin),
     db: Session = Depends(get_db)
 ):
-    clean_pan = req.pan_number.strip().upper()
-    clean_ifsc = req.bank_ifsc.strip().upper()
-    clean_acc = req.bank_account_no.strip()
     clean_name = req.account_holder_name.strip()
+    clean_upi = req.upi_id.strip().lower()
 
-    if len(clean_pan) != 10:
-        raise HTTPException(status_code=400, detail="Invalid PAN Card Number. Must be exactly 10 alphanumeric characters.")
+    if "@" not in clean_upi:
+        raise HTTPException(status_code=400, detail="Invalid UPI ID format. Must be in format user@upi or mobile@okicici.")
 
     db_user = db.query(DBUser).filter(DBUser.id == user["id"]).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="User account not found.")
 
-    db_user.bank_account_no = clean_acc
-    db_user.bank_ifsc = clean_ifsc
     db_user.account_holder_name = clean_name
-    db_user.pan_number = clean_pan
+    db_user.upi_id = clean_upi
     db_user.settlement_tenure = req.settlement_tenure or "instant"
 
-    route_status_msg = "Bank details & settlement tenure saved successfully!"
+    route_status_msg = f"UPI ID '{clean_upi}' saved for automated settlements!"
 
+    # Automate Contact & Fund Account creation in Razorpay Payouts
+    # Automate Contact & Fund Account creation in Razorpay Payouts
     if razorpay_client:
         try:
-            account_payload = {
+            import requests
+            key_id = os.getenv("RAZORPAY_KEY_ID", "")
+            key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
+            auth = (key_id, key_secret)
+
+            # 1. Create Razorpay Contact
+            contact_payload = {
+                "name": clean_name,
                 "email": db_user.email,
-                "phone": db_user.phone or "9155118661",
-                "legal_business_name": clean_name,
-                "business_type": "individual",
-                "profile": {
-                    "category": "housing",
-                    "subcategory": "real_estate_agents"
-                },
-                "legal_info": {
-                    "pan": clean_pan
-                }
+                "contact": db_user.phone or "9155118661",
+                "type": "vendor",
+                "reference_id": db_user.id
             }
-            acc_response = razorpay_client.account.create(account_payload) # type: ignore
-            linked_account_id = acc_response.get("id")
-            if linked_account_id:
-                bank_payload = {
-                    "ifsc_code": clean_ifsc,
-                    "account_number": clean_acc,
-                    "beneficiary_name": clean_name
+            res_c = requests.post("https://api.razorpay.com/v1/contacts", json=contact_payload, auth=auth)
+            if res_c.ok:
+                contact_id = res_c.json().get("id")
+                db_user.razorpay_contact_id = contact_id
+
+                # 2. Create Razorpay Fund Account (VPA / UPI)
+                fund_payload = {
+                    "account_type": "vpa",
+                    "contact_id": contact_id,
+                    "vpa": {
+                        "address": clean_upi
+                    }
                 }
-                razorpay_client.account.bank_account(linked_account_id, bank_payload) # type: ignore
-                db_user.razorpay_account_id = linked_account_id
-                route_status_msg = f"Direct Bank Settlement & Razorpay Route ({linked_account_id}) activated!"
+                res_f = requests.post("https://api.razorpay.com/v1/fund_accounts", json=fund_payload, auth=auth)
+                if res_f.ok:
+                    fund_account_id = res_f.json().get("id")
+                    db_user.razorpay_fund_account_id = fund_account_id
+                    route_status_msg = f"Direct Automated UPI Settlement ({clean_upi}) activated!"
         except Exception as e:
-            fallback_acc_id = f"acc_linked_{uuid.uuid4().hex[:8]}"
-            db_user.razorpay_account_id = fallback_acc_id
-    else:
-        db_user.razorpay_account_id = f"acc_linked_{uuid.uuid4().hex[:8]}"
+            print(f"[RAZORPAY PAYOUTS NOTICE] Fallback mode active: {e}")
+            db_user.razorpay_fund_account_id = f"fa_sim_{uuid.uuid4().hex[:8]}"
 
     db.commit()
 
     return {
         "status": "success",
         "message": route_status_msg,
-        "razorpay_account_id": db_user.razorpay_account_id,
+        "upi_id": db_user.upi_id,
+        "fund_account_id": db_user.razorpay_fund_account_id,
         "settlement_tenure": db_user.settlement_tenure
     }
 
@@ -1595,6 +1607,7 @@ def verify_payment_and_fulfill(
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # 1. Verify Razorpay Payment Signature
     if RAZORPAY_KEY_SECRET and RAZORPAY_KEY_SECRET != "YOUR_SECRET_KEY":
         secret_bytes = RAZORPAY_KEY_SECRET.encode("utf-8")
         msg_bytes = f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode("utf-8")
@@ -1612,6 +1625,7 @@ def verify_payment_and_fulfill(
     target_type = "Mess Subscription" if is_mess_item else "PG Room"
     booking_id = f"b-{uuid.uuid4().hex[:8]}"
 
+    # 2. Resolve Vendor Account
     vendor_user = None
     target_id = None
     if is_mess_item:
@@ -1631,12 +1645,13 @@ def verify_payment_and_fulfill(
                 vendor_user = db.query(DBUser).filter(DBUser.id == pg.owner_id).first()
 
     vendor_tenure = vendor_user.settlement_tenure if vendor_user else "instant"
-    transfer_status = "Pending Approval" if vendor_tenure == "admin_approval" else ("On Hold" if vendor_tenure in ["7_days", "15_days", "30_days"] else "Settled")
+    transfer_status = "Pending Approval" if vendor_tenure == "admin_approval" else ("On Hold" if vendor_tenure in ["7_days", "15_days", "30_days"] else "Processing")
     
     tenure_days_map = {"instant": 0, "7_days": 7, "15_days": 15, "30_days": 30, "admin_approval": 0}
     tenure_days = tenure_days_map.get(vendor_tenure, 0)
     settlement_due = (datetime.now() + timedelta(days=tenure_days)).strftime("%Y-%m-%d") if tenure_days > 0 else datetime.now().strftime("%Y-%m-%d")
 
+    # 3. Create Payment Receipt
     receipt = DBPaymentReceipt(
         transaction_id=txn_id,
         order_id=req.razorpay_order_id,
@@ -1656,15 +1671,14 @@ def verify_payment_and_fulfill(
         tenure_days=tenure_days,
         settlement_due_date=settlement_due,
         payment_date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")   # original Supabase NOT NULL column
+        date=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
     db.add(receipt)
 
-    # 1. Resolve admin fallback user BEFORE instantiating DBSettlement
+    # 4. Create Settlement Entry
     admin_user = db.query(DBUser).filter(DBUser.role == "admin").first()
     admin_id = admin_user.id if admin_user else "usr-admin01"
 
-    # 2. Instantiate DBSettlement with valid vendor_id and closed parenthesis
     settlement_entry = DBSettlement(
         id=f"stl-{uuid.uuid4().hex[:8]}",
         vendor_id=vendor_user.id if vendor_user else admin_id,
@@ -1678,6 +1692,42 @@ def verify_payment_and_fulfill(
     )
     db.add(settlement_entry)
 
+    # 5. AUTOMATED INSTANT UPI PAYOUT EXECUTION
+    if vendor_user and vendor_user.razorpay_fund_account_id and vendor_tenure == "instant":
+        try:
+            import requests
+            key_id = os.getenv("RAZORPAY_KEY_ID", "")
+            key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
+            auth = (key_id, key_secret)
+
+            payout_payload = {
+                "account_number": os.getenv("RAZORPAYX_ACCOUNT_NUMBER", "2334455667788"),
+                "fund_account_id": vendor_user.razorpay_fund_account_id,
+                "amount": int(round(vendor_payout * 100)),  # Convert rupees to paise
+                "currency": "INR",
+                "mode": "UPI",
+                "purpose": "payout",
+                "queue_if_low_balance": True,
+                "reference_id": txn_id,
+                "narration": f"Basera Payout {req.item_name[:15]}"
+            }
+            
+            res_payout = requests.post(
+                "https://api.razorpay.com/v1/payouts",
+                json=payout_payload,
+                auth=auth
+            )
+
+            if res_payout.ok:
+                transfer_status = "Settled"
+                receipt.route_transfer_status = "Settled"
+                settlement_entry.status = "Settled"
+            else:
+                print(f"[RAZORPAY PAYOUT RESPONSE NOTICE] {res_payout.text}")
+        except Exception as payout_err:
+            print(f"[AUTOMATED UPI PAYOUT NOTICE] Queued for admin review: {payout_err}")
+
+    # 6. Create Student Booking
     duration = req.duration_days if req.duration_days and req.duration_days > 0 else 30
     new_expiry = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d")
 
@@ -1697,6 +1747,7 @@ def verify_payment_and_fulfill(
         status="Active"
     ))
 
+    # 7. Update Mess Student Record or Room Vacancy
     if is_mess_item:
         extracted_mess_name = req.item_name.split("(")[0].strip() if "(" in req.item_name else req.item_name
         diet_choice = req.diet_preference or "Veg"
@@ -1761,6 +1812,7 @@ def verify_payment_and_fulfill(
 
     db.commit()
 
+    # 8. Queue Email Task
     background_tasks.add_task(
         send_email_notification,
         user["email"],
@@ -1775,7 +1827,6 @@ def verify_payment_and_fulfill(
         "vendor_payout": vendor_payout,
         "platform_fee": platform_fee
     }
-
 
 # ─── ADMIN SETTLEMENT RELEASE & TENURE APPROVAL WORKFLOW ───────────
 
