@@ -22,9 +22,11 @@ from sqlalchemy import create_engine, String, Integer, Boolean, Float, Text, Dat
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase, Mapped, mapped_column
 
 # ─── SECURITY & AUTHENTICATION UTILITIES ──────────────────────────────
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "basera-super-secure-production-key-2026-xyz-8899")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    import secrets
+    SECRET_KEY = secrets.token_urlsafe(32)
 ACCESS_TOKEN_EXPIRE_DAYS = 30
-
 def hash_password(password: str) -> str:
     """Secure PBKDF2 password hasher with cryptographic salt."""
     salt = os.urandom(16)
@@ -55,14 +57,15 @@ def create_jwt_token(data: dict, expires_delta: Optional[timedelta] = None) -> s
     to_encode.update({"exp": int(expire.timestamp())})
     
     header = {"alg": "HS256", "typ": "JWT"}
-    header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
-    payload_b64 = base64.urlsafe_b64encode(json.dumps(to_encode).encode()).decode().rstrip("=")
-    signature = hmac.new(
-        SECRET_KEY.encode(),
-        f"{header_b64}.{payload_b64}".encode(),
-        hashlib.sha256
-    ).digest()
+    header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode("utf-8")).decode().rstrip("=")
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(to_encode).encode("utf-8")).decode().rstrip("=")
+    
+    secret_bytes = (SECRET_KEY or "basera-super-secure-production-key-2026-xyz-8899").encode("utf-8")
+    msg_bytes = f"{header_b64}.{payload_b64}".encode("utf-8")
+    
+    signature = hmac.new(secret_bytes, msg_bytes, hashlib.sha256).digest()
     sig_b64 = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 def decode_jwt_token(token: str) -> Optional[dict]:
@@ -72,16 +75,16 @@ def decode_jwt_token(token: str) -> Optional[dict]:
             return None
         header_b64, payload_b64, sig_b64 = parts
         
-        expected_sig = hmac.new(
-            SECRET_KEY.encode(),
-            f"{header_b64}.{payload_b64}".encode(),
-            hashlib.sha256
-        ).digest()
+        secret_bytes = (SECRET_KEY or "basera-super-secure-production-key-2026-xyz-8899").encode("utf-8")
+        msg_bytes = f"{header_b64}.{payload_b64}".encode("utf-8")
+        
+        expected_sig = hmac.new(secret_bytes, msg_bytes, hashlib.sha256).digest()
         actual_sig = base64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
+        
         if not hmac.compare_digest(expected_sig, actual_sig):
             return None
         
-        payload_json = base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)).decode()
+        payload_json = base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)).decode("utf-8")
         payload = json.loads(payload_json)
         
         exp = payload.get("exp")
@@ -411,7 +414,7 @@ class DBPaymentReceipt(Base):
 class DBSettlement(Base):
     __tablename__ = "settlements"
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
-    vendor_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
+    vendor_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("users.id"), nullable=True, index=True)
     vendor_name: Mapped[str] = mapped_column(String, nullable=False)
     transaction_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
@@ -422,7 +425,7 @@ class DBSettlement(Base):
     requested_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     approved_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-
+    
 class DBComplaint(Base):
     __tablename__ = "complaints"
     id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
@@ -483,6 +486,12 @@ def seed_database():
                         END $$;
                     """))
                 except Exception: pass
+
+            if "mess_students" in tables:
+                ms_cols = [c["name"] for c in inspector.get_columns("mess_students")]
+                for col, col_type in [("user_id", "VARCHAR DEFAULT NULL"), ("start_date", "VARCHAR DEFAULT NULL"), ("expiry_date", "VARCHAR DEFAULT NULL")]:
+                    if col not in ms_cols:
+                        conn.execute(text(f"ALTER TABLE mess_students ADD COLUMN {col} {col_type};"))
 
             if "payment_receipts" in tables:
                 cols = [c["name"] for c in inspector.get_columns("payment_receipts")]
@@ -1551,15 +1560,13 @@ def verify_payment_and_fulfill(
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if RAZORPAY_KEY_SECRET and RAZORPAY_KEY_SECRET != "YOUR_SECRET_KEY" and not req.razorpay_order_id.startswith("order_"):
-        generated_signature = hmac.new(
-            RAZORPAY_KEY_SECRET.encode(),
-            f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode(),
-            hashlib.sha256
-        ).hexdigest()
+    if RAZORPAY_KEY_SECRET and RAZORPAY_KEY_SECRET != "YOUR_SECRET_KEY":
+        secret_bytes = RAZORPAY_KEY_SECRET.encode("utf-8")
+        msg_bytes = f"{req.razorpay_order_id}|{req.razorpay_payment_id}".encode("utf-8")
+        generated_signature = hmac.new(secret_bytes, msg_bytes, hashlib.sha256).hexdigest()
 
-        if generated_signature != req.razorpay_signature:
-            raise HTTPException(status_code=400, detail="Payment verification failed! Invalid cryptographic signature.")
+        if not hmac.compare_digest(generated_signature, req.razorpay_signature):
+            raise HTTPException(status_code=400, detail="Invalid payment signature.")
 
     txn_id = req.razorpay_payment_id
     total_amt = float(req.monthly_amount)
@@ -1618,9 +1625,14 @@ def verify_payment_and_fulfill(
     )
     db.add(receipt)
 
+    # 1. Resolve admin fallback user BEFORE instantiating DBSettlement
+    admin_user = db.query(DBUser).filter(DBUser.role == "admin").first()
+    admin_id = admin_user.id if admin_user else "usr-admin01"
+
+    # 2. Instantiate DBSettlement with valid vendor_id and closed parenthesis
     settlement_entry = DBSettlement(
         id=f"stl-{uuid.uuid4().hex[:8]}",
-        vendor_id=vendor_user.id if vendor_user else "admin",
+        vendor_id=vendor_user.id if vendor_user else admin_id,
         vendor_name=vendor_user.full_name if vendor_user else "Platform Default",
         transaction_id=txn_id,
         amount=vendor_payout,
@@ -1856,12 +1868,11 @@ def get_vendor_dashboard_summary(user: dict = Depends(require_vendor_or_admin), 
         txns = db.query(DBPaymentReceipt).all()
         active_students = db.query(DBBooking).filter(DBBooking.status == "Active").count()
 
-    total_gross = sum(t.total_amount for t in txns)
-    total_commission = sum(t.platform_fee for t in txns)
-    total_net = sum(t.vendor_payout_amount for t in txns)
-    total_settled = sum(t.vendor_payout_amount for t in txns if t.route_transfer_status == "Settled")
-    total_pending_approval = sum(t.vendor_payout_amount for t in txns if t.route_transfer_status in ["Pending Approval", "On Hold"])
-
+    total_gross = sum((t.total_amount or 0.0) for t in txns)
+    total_commission = sum((t.platform_fee or 0.0) for t in txns)
+    total_net = sum((t.vendor_payout_amount or 0.0) for t in txns)
+    total_settled = sum((t.vendor_payout_amount or 0.0) for t in txns if t.route_transfer_status == "Settled")
+    total_pending_approval = sum((t.vendor_payout_amount or 0.0) for t in txns if t.route_transfer_status in ["Pending Approval", "On Hold"])
     return {
         "status": "success",
         "total_gross": round(total_gross, 2),
@@ -1905,9 +1916,9 @@ def get_vendor_monthly_credits(
 
     txns = query.order_by(DBPaymentReceipt.payment_date.desc()).all()
 
-    total_gross = sum(t.total_amount for t in txns)
-    total_commission = sum(t.platform_fee for t in txns)
-    total_net = sum(t.vendor_payout_amount for t in txns)
+    total_gross = sum((t.total_amount or 0.0) for t in txns)
+    total_commission = sum((t.platform_fee or 0.0) for t in txns)
+    total_net = sum((t.vendor_payout_amount or 0.0) for t in txns)
 
     formatted_txns = [
         {
@@ -2630,8 +2641,11 @@ def get_notifications(user: dict = Depends(get_current_user), db: Session = Depe
 
 @app.get("/api/admin/metrics")
 def get_admin_metrics(user: dict = Depends(require_admin), db: Session = Depends(get_db)):
-    total_revenue = sum(t.total_amount for t in db.query(DBPaymentReceipt).all())
-    total_commission = sum(t.platform_fee for t in db.query(DBPaymentReceipt).all())
+    all_receipts = db.query(DBPaymentReceipt).all()
+    total_revenue = sum((t.total_amount or 0.0) for t in all_receipts)
+    total_commission = sum((t.platform_fee or 0.0) for t in all_receipts)
+    
+    # Add this line to define pending_settlements
     pending_settlements = db.query(DBSettlement).filter(DBSettlement.status.in_(["Pending Approval", "On Hold"])).count()
 
     return {
