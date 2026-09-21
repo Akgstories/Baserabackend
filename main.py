@@ -1310,6 +1310,20 @@ def delete_mess_listing(mess_id: str, user: dict = Depends(require_admin), db: S
     db.commit()
     return {"status": "success", "message": f"Mess listing '{mess.name}' deleted successfully."}
 
+@app.delete("/api/mess/pricing/delete")
+def delete_mess_pricing(mess_id: str, location_name: str, db: Session = Depends(get_db)):
+    # Delete the specific location pricing rule
+    pricing = db.query(DBMessPricing).filter(
+        DBMessPricing.mess_id == mess_id,
+        DBMessPricing.location_name.ilike(location_name)
+    ).first()
+    
+    if not pricing:
+        raise HTTPException(status_code=404, detail=f"Pricing rule for '{location_name}' not found.")
+    
+    db.delete(pricing)
+    db.commit()
+    return {"status": "success", "message": f"Pricing rates for '{location_name}' deleted successfully!"}
 
 
 # ─── PG LISTINGS & ROOM MANAGEMENT ENDPOINTS ───────────────────────
