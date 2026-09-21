@@ -1221,39 +1221,65 @@ def get_mess_listings(db: Session = Depends(get_db)):
         for m in listings
     ]
 @app.post("/api/mess/add-listing")
-def add_mess_listing(req: AddMessRequest, user: dict = Depends(require_vendor_or_admin), db: Session = Depends(get_db)):
-    mess_id = f"mess-{int(datetime.now().timestamp())}"
+def create_mess_listing(
+    req: AddMessRequest,
+    user: dict = Depends(require_vendor_or_admin),
+    db: Session = Depends(get_db)
+):
+    mess_id = f"mess-{uuid.uuid4().hex[:6]}"
     
     new_mess = DBMessListing(
         id=mess_id,
-        name=req.name,
-        provider_name=req.provider_name,
+        owner_id=user["id"],
+        name=req.name.strip(),
+        provider_name=req.provider_name or user["full_name"],
         monthly_price=req.monthly_price,
         diet_type=req.diet_type,
         meals_per_day=req.meals_per_day,
+        rating="5.0 (New)",
         address=req.address,
         google_map_url=req.google_map_url,
-        description=req.description,
-        user_id=user["id"]
+        description=req.description
     )
     db.add(new_mess)
 
-    # Automatically add default location pricing
-    default_locations = ["GEC Main Gate", "Chandankiyari", "Ghoragara"]
-    for loc in default_locations:
-        p = DBMessPricing(
+    # Populate location rates with both new and legacy columns to prevent crashes
+    db.add_all([
+        DBMessPricing(
             mess_id=mess_id,
-            location_name=loc,
-            breakfast_rate=30,
-            lunch_rate=40,
-            dinner_rate=40,
-            three_time_rate=100,  # Included for backward compatibility
-            two_time_rate=80
+            location_name="GEC Main Gate",
+            breakfast_rate=int(req.monthly_price / 30 * 0.3),
+            lunch_rate=int(req.monthly_price / 30 * 0.35),
+            dinner_rate=int(req.monthly_price / 30 * 0.35),
+            three_time_rate=int(req.monthly_price / 30),
+            two_time_rate=int(req.monthly_price / 30 * 0.8)
+        ),
+        DBMessPricing(
+            mess_id=mess_id,
+            location_name="Chandankiyari",
+            breakfast_rate=int(req.monthly_price / 30 * 0.25),
+            lunch_rate=int(req.monthly_price / 30 * 0.35),
+            dinner_rate=int(req.monthly_price / 30 * 0.35),
+            three_time_rate=int(req.monthly_price / 30 * 0.95),
+            two_time_rate=int(req.monthly_price / 30 * 0.75)
+        ),
+        DBMessPricing(
+            mess_id=mess_id,
+            location_name="Ghoragara",
+            breakfast_rate=int(req.monthly_price / 30 * 0.3),
+            lunch_rate=int(req.monthly_price / 30 * 0.4),
+            dinner_rate=int(req.monthly_price / 30 * 0.4),
+            three_time_rate=int(req.monthly_price / 30 * 1.05),
+            two_time_rate=int(req.monthly_price / 30 * 0.85)
         )
-        db.add(p)
+    ])
 
     db.commit()
-    return {"status": "success", "message": "Mess listing created successfully!"}
+    return {
+        "status": "success",
+        "message": f"Mess '{req.name}' listed successfully with dynamic location pricing!",
+        "mess_id": mess_id
+    }
 
 @app.delete("/api/mess-listings/{mess_id}")
 def delete_mess_listing(mess_id: str, user: dict = Depends(require_admin), db: Session = Depends(get_db)):
