@@ -1027,8 +1027,12 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
     
     token = create_jwt_token({"user_id": new_user.id, "email": new_user.email, "role": new_user.role})
     new_user.token = token
+    
+    # --- CRITICAL FIX: Add and commit DBUser FIRST ---
     db.add(new_user)
+    db.commit()
 
+    # --- Now add DBMessStudent after the user row exists in 'users' ---
     if role == "student":
         db.add(DBMessStudent(
             id=f"ms-{uuid.uuid4().hex[:6]}",
@@ -1043,8 +1047,7 @@ def register_user(req: RegisterRequest, background_tasks: BackgroundTasks, db: S
             base_price=3000,
             is_active=False
         ))
-
-    db.commit()
+        db.commit()
 
     background_tasks.add_task(
         send_email_notification,
@@ -2738,3 +2741,5 @@ def reset_entire_database(user: dict = Depends(require_admin), db: Session = Dep
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to reset database: {str(e)}")
+
+
