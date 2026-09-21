@@ -307,8 +307,9 @@ class DBMessPricing(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
     mess_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     location_name: Mapped[str] = mapped_column(String, nullable=False)
-    three_time_rate: Mapped[int] = mapped_column(Integer, nullable=False)
-    two_time_rate: Mapped[int] = mapped_column(Integer, nullable=False)
+    breakfast_rate: Mapped[int] = mapped_column(Integer, default=30)
+    lunch_rate: Mapped[int] = mapped_column(Integer, default=40)
+    dinner_rate: Mapped[int] = mapped_column(Integer, default=40)
 
 class DBPGRoom(Base):
     __tablename__ = "pg_rooms"
@@ -884,8 +885,9 @@ class UpdateMessPriceRequest(BaseModel):
 class UpdateMessLocationPricingRequest(BaseModel):
     mess_id: str
     location_name: str
-    three_time_rate: int
-    two_time_rate: int
+    breakfast_rate: int
+    lunch_rate: int
+    dinner_rate: int
 
 class MealCancelRequest(BaseModel):
     meal_type: str
@@ -1149,11 +1151,11 @@ def get_mess_pricing(mess_id: Optional[str] = Query(None), db: Session = Depends
             "id": p.id,
             "mess_id": p.mess_id,
             "location_name": p.location_name,
-            "three_time_rate": p.three_time_rate,
-            "two_time_rate": p.two_time_rate
+            "breakfast_rate": getattr(p, "breakfast_rate", 30),
+            "lunch_rate": getattr(p, "lunch_rate", 40),
+            "dinner_rate": getattr(p, "dinner_rate", 40)
         } for p in pricing
     ]
-
 @app.post("/api/mess/update-location-price")
 def update_mess_location_price(
     req: UpdateMessLocationPricingRequest,
@@ -1162,23 +1164,25 @@ def update_mess_location_price(
 ):
     item = db.query(DBMessPricing).filter(
         DBMessPricing.mess_id == req.mess_id,
-        DBMessPricing.location_name.ilike(req.location_name)
+        DBMessPricing.location_name.ilike(req.location_name.strip())
     ).first()
     
     if not item:
         item = DBMessPricing(
             mess_id=req.mess_id,
             location_name=req.location_name.strip(),
-            three_time_rate=req.three_time_rate,
-            two_time_rate=req.two_time_rate
+            breakfast_rate=req.breakfast_rate,
+            lunch_rate=req.lunch_rate,
+            dinner_rate=req.dinner_rate
         )
         db.add(item)
     else:
-        item.three_time_rate = req.three_time_rate
-        item.two_time_rate = req.two_time_rate
+        item.breakfast_rate = req.breakfast_rate
+        item.lunch_rate = req.lunch_rate
+        item.dinner_rate = req.dinner_rate
 
     db.commit()
-    return {"status": "success", "message": f"Updated rates for {req.location_name} successfully in database!"}
+    return {"status": "success", "message": f"Updated rates for {req.location_name} successfully!"}
 
 @app.get("/api/mess-listings")
 def get_mess_listings(db: Session = Depends(get_db)):
