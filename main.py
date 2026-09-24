@@ -11,6 +11,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
+
+
 from typing import List, Optional
 from sqlalchemy import func
 
@@ -49,12 +51,19 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     except Exception:
         return False
 
+# Define Indian Standard Timezone (UTC + 5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now() -> datetime:
+    """Returns current datetime in Indian Standard Time (IST)."""
+    return datetime.now(IST)
+
 def create_jwt_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = get_ist_now() + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+        expire = get_ist_now() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": int(expire.timestamp())})
     
     header = {"alg": "HS256", "typ": "JWT"}
@@ -89,11 +98,12 @@ def decode_jwt_token(token: str) -> Optional[dict]:
         payload = json.loads(payload_json)
         
         exp = payload.get("exp")
-        if exp and datetime.now(timezone.utc).timestamp() > exp:
+        if exp and get_ist_now().timestamp() > exp:
             return None
         return payload
     except Exception:
         return None
+
 
 
 # ─── DATABASE CONFIGURATION ─────────────────────────────────────────
@@ -274,7 +284,7 @@ class DBUser(Base):
     pan_number: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     settlement_tenure: Mapped[str] = mapped_column(String, default="instant", server_default="instant")
     auto_settle: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default="now()")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=get_ist_now, server_default="now()")
 
 class DBPGListing(Base):
     __tablename__ = "pg_listings"
@@ -346,7 +356,7 @@ class DBVacateRequest(Base):
     student_phone: Mapped[str] = mapped_column(String, nullable=False)
     booking_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, default="Pending")
-    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
+    created_at: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d %H:%M"))
 
 class DBMessStudent(Base):
     __tablename__ = "mess_students"
@@ -362,8 +372,8 @@ class DBMessStudent(Base):
     diet: Mapped[str] = mapped_column(String, default="Veg")
     base_price: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    start_date: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d"))
-    expiry_date: Mapped[str] = mapped_column(String, default=lambda: (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"))
+    start_date: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d"))
+    expiry_date: Mapped[str] = mapped_column(String, default=lambda: (get_ist_now() + timedelta(days=30)).strftime("%Y-%m-%d"))
 
 class DBMealCancellation(Base):
     __tablename__ = "meal_cancellations"
@@ -421,8 +431,8 @@ class DBPaymentReceipt(Base):
     route_transfer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     tenure_days: Mapped[int] = mapped_column(Integer, default=0)
     settlement_due_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    payment_date: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    date: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # original Supabase column
+    payment_date: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d %H:%M:%S"))
+    date: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d %H:%M:%S"))
 
 class DBSettlement(Base):
     __tablename__ = "settlements"
@@ -435,9 +445,10 @@ class DBSettlement(Base):
     status: Mapped[str] = mapped_column(String, default="Pending Approval")
     payout_mode: Mapped[str] = mapped_column(String, default="Razorpay Route / Bank")
     settlement_tenure: Mapped[str] = mapped_column(String, default="admin_approval")
-    requested_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    requested_at: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d %H:%M:%S"))
     approved_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
     
 class DBComplaint(Base):
     __tablename__ = "complaints"
@@ -450,7 +461,7 @@ class DBComplaint(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String, default="Pending")
-    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
+    created_at: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d %H:%M"))
 
 class DBNotification(Base):
     __tablename__ = "notifications"
@@ -460,7 +471,7 @@ class DBNotification(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(String, default="general")
-    created_at: Mapped[str] = mapped_column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
+    created_at: Mapped[str] = mapped_column(String, default=lambda: get_ist_now().strftime("%Y-%m-%d %H:%M"))
 
 class DBMessPricingRuleSchema(BaseModel):
     mess_id: str
@@ -2061,9 +2072,10 @@ def cancel_meal(
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    target_date = req.date if req.date else datetime.now().strftime("%Y-%m-%d")
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    now_time = datetime.now().time()
+    ist_now = get_ist_now()
+    target_date = req.date if req.date else ist_now.strftime("%Y-%m-%d")
+    today_str = ist_now.strftime("%Y-%m-%d")
+    now_time = ist_now.time()
 
     if target_date < today_str:
         raise HTTPException(status_code=400, detail="Cannot cancel meals for past dates.")
@@ -2140,7 +2152,7 @@ def cancel_meal(
         meal=req.meal_type,
         refund_amount=refund_amount,
         date=target_date,
-        timestamp=datetime.now().strftime("%I:%M %p")
+        timestamp=get_ist_now().strftime("%I:%M %p")
     )
     db.add(new_cancel)
 
@@ -2185,10 +2197,12 @@ def uncancel_meal(
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    target_date = req.date if req.date else datetime.now().strftime("%Y-%m-%d")
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    now_time = datetime.now().time()
-
+    # NEW (IST-Aware)
+    ist_now = get_ist_now()
+    target_date = req.date if req.date else ist_now.strftime("%Y-%m-%d")
+    today_str = ist_now.strftime("%Y-%m-%d")
+    now_time = ist_now.time()
+    
     if target_date < today_str:
         raise HTTPException(status_code=400, detail="Cannot modify meal status for past dates.")
 
